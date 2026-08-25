@@ -2,6 +2,7 @@ import logging
 from equipment_drivers.interfaces import PDUDriver
 from equipment_drivers.registry import registry
 from equipment_drivers.responses import PDUResponse
+from equipment_drivers.exceptions import EquipmentNotConnectedError
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,7 @@ class DummyPDUDriver(PDUDriver):
 
     def turn_on(self, channel: int) -> PDUResponse:
         if not self.connected:
-            raise Exception("Not connected to PDU")
+            raise EquipmentNotConnectedError("Not connected to PDU")
         self.validate_channel(channel)
         logger.info(f"Turning ON channel {channel} on Dummy PDU")
         raw_output = f"DUMMY_RAW: Channel {channel} set to 1"
@@ -41,7 +42,7 @@ class DummyPDUDriver(PDUDriver):
 
     def turn_off(self, channel: int) -> PDUResponse:
         if not self.connected:
-            raise Exception("Not connected to PDU")
+            raise EquipmentNotConnectedError("Not connected to PDU")
         self.validate_channel(channel)
         logger.info(f"Turning OFF channel {channel} on Dummy PDU")
         raw_output = f"DUMMY_RAW: Channel {channel} set to 0"
@@ -49,7 +50,7 @@ class DummyPDUDriver(PDUDriver):
 
     def get_status(self, channel: int) -> PDUResponse:
         if not self.connected:
-            raise Exception("Not connected to PDU")
+            raise EquipmentNotConnectedError("Not connected to PDU")
         self.validate_channel(channel)
         logger.info(f"Checking status for channel {channel} on Dummy PDU")
         raw_output = f"DUMMY_RAW: Channel {channel} is 1"

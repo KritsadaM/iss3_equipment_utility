@@ -3,8 +3,8 @@ from typing import Optional, Tuple
 import requests
 from requests.auth import HTTPBasicAuth
 from equipment_drivers.interfaces import PDUDriver
-from equipment_drivers.registry import registry
 from equipment_drivers.responses import PDUResponse
+from equipment_drivers.exceptions import EquipmentConnectionError, EquipmentCommandError, EquipmentNotConnectedError
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +29,7 @@ class BaseWtiPduDriver(PDUDriver):
         self.auth = HTTPBasicAuth(self.username, self.password)
         self.session = requests.Session()
         self.timeout = 5
+        self.scheme = "http"
 
     @classmethod
     def probe(cls, ip: str, port: int) -> bool:
@@ -39,7 +40,8 @@ class BaseWtiPduDriver(PDUDriver):
     def connect(self, ip: str, port: int, username: Optional[str] = None, password: Optional[str] = None) -> bool:
         self.ip = ip
         self.port = port
-        self.base_url = f"http://{self.ip}:{self.port}/api/v2"
+        self.scheme = "https" if port == 443 else self.scheme
+        self.base_url = f"{self.scheme}://{self.ip}:{self.port}/api/v2"
 
         if username is not None:
             self.username = username
@@ -55,7 +57,7 @@ class BaseWtiPduDriver(PDUDriver):
             return True
         except requests.exceptions.RequestException as e:
             logger.error(f"Failed to connect to {self.get_model()} at {self.ip}:{self.port}: {e}")
-            raise ConnectionError(f"Connection to WTI PDU failed: {e}")
+            raise EquipmentConnectionError(f"Connection to WTI PDU failed: {e}")
 
     def disconnect(self) -> bool:
         self.session.close()
@@ -81,7 +83,7 @@ class BaseWtiPduDriver(PDUDriver):
 
     def _control_plug(self, channel: int, action: int) -> Tuple[bool, str]:
         if not self.connected:
-            raise Exception("Not connected to PDU")
+            raise EquipmentNotConnectedError("Not connected to PDU")
         self.validate_channel(channel)
 
         url = f"{self.base_url}/plugs/{channel}"
@@ -92,7 +94,7 @@ class BaseWtiPduDriver(PDUDriver):
             return True, response.text
         except requests.exceptions.RequestException as e:
             logger.error(f"Failed to control plug {channel} on {self.get_model()}: {e}")
-            raise Exception(f"WTI Plug Control API Error: {e}")
+            raise EquipmentCommandError(f"WTI Plug Control API Error: {e}")
 
     def turn_on(self, channel: int) -> PDUResponse:
         logger.info(f"Turning ON channel {channel} on {self.get_model()}")
@@ -106,7 +108,7 @@ class BaseWtiPduDriver(PDUDriver):
 
     def get_status(self, channel: int) -> PDUResponse:
         if not self.connected:
-            raise Exception("Not connected to PDU")
+            raise EquipmentNotConnectedError("Not connected to PDU")
         self.validate_channel(channel)
 
         url = f"{self.base_url}/plugs/{channel}"
@@ -126,133 +128,23 @@ class BaseWtiPduDriver(PDUDriver):
             return PDUResponse(success=True, action="get_status", channel=channel, raw=raw_text, status=status)
         except requests.exceptions.RequestException as e:
             logger.error(f"Failed to get status for plug {channel} on {self.get_model()}: {e}")
-            raise Exception(f"WTI Plug Status API Error: {e}")
+            raise EquipmentCommandError(f"WTI Plug Status API Error: {e}")
 
 
-# ==========================================
-# WTI VMR Series (High-Density Switched PDUs)
-# ==========================================
+# ---------------------------------------------------------------------------
+# Backward-compatible names (see apc_models.py for explanation).
+# ---------------------------------------------------------------------------
+from equipment_drivers.registry import registry as _registry
 
-class WtiVmrHd4d20Driver(BaseWtiPduDriver):
-    MODEL_NAME = "WTI VMR-HD4D20 C19"
-    DEFAULT_CHANNEL_COUNT = 20
-    IP_SUFFIX = ".40"
+def _get_model_classes():
+    return {sig: cls for sig, cls in _registry.get_all_drivers('pdu')
+            if sig.startswith('wti_')}
 
-class WtiVmr8Hd20Driver(BaseWtiPduDriver):
-    MODEL_NAME = "WTI VMR-8HD20 Switched PDU"
-    DEFAULT_CHANNEL_COUNT = 8
-    IP_SUFFIX = ".408"
-
-class WtiVmr16Hd20Driver(BaseWtiPduDriver):
-    MODEL_NAME = "WTI VMR-16HD20 Switched PDU"
-    DEFAULT_CHANNEL_COUNT = 16
-    IP_SUFFIX = ".41"
-
-class WtiVmr24Hd20Driver(BaseWtiPduDriver):
-    MODEL_NAME = "WTI VMR-24HD20 Switched PDU"
-    DEFAULT_CHANNEL_COUNT = 24
-    IP_SUFFIX = ".424"
-
-
-# ==========================================
-# WTI NPS Series (Network Power Switches)
-# ==========================================
-
-class WtiNps8Hd20Driver(BaseWtiPduDriver):
-    MODEL_NAME = "WTI NPS-8HD20 Network Power Switch"
-    DEFAULT_CHANNEL_COUNT = 8
-    IP_SUFFIX = ".42"
-
-class WtiNps16Hd20Driver(BaseWtiPduDriver):
-    MODEL_NAME = "WTI NPS-16HD20 Network Power Switch"
-    DEFAULT_CHANNEL_COUNT = 16
-    IP_SUFFIX = ".416"
-
-class WtiNps24Hd20Driver(BaseWtiPduDriver):
-    MODEL_NAME = "WTI NPS-24HD20 Network Power Switch"
-    DEFAULT_CHANNEL_COUNT = 24
-    IP_SUFFIX = ".425"
-
-
-# ==========================================
-# WTI IPS Series (Internet Power Switches)
-# ==========================================
-
-class WtiIps400Driver(BaseWtiPduDriver):
-    MODEL_NAME = "WTI IPS-400 Internet Power Switch"
-    DEFAULT_CHANNEL_COUNT = 4
-    IP_SUFFIX = ".404"
-
-class WtiIps800Driver(BaseWtiPduDriver):
-    MODEL_NAME = "WTI IPS-800 Internet Power Switch"
-    DEFAULT_CHANNEL_COUNT = 8
-    IP_SUFFIX = ".43"
-
-class WtiIps1600Driver(BaseWtiPduDriver):
-    MODEL_NAME = "WTI IPS-1600 Internet Power Switch"
-    DEFAULT_CHANNEL_COUNT = 16
-    IP_SUFFIX = ".417"
-
-
-# ==========================================
-# WTI CPM Series (Control Port Managers / Hybrid)
-# ==========================================
-
-class WtiCpm800Driver(BaseWtiPduDriver):
-    MODEL_NAME = "WTI CPM-800 Control Port Manager"
-    DEFAULT_CHANNEL_COUNT = 8
-    IP_SUFFIX = ".44"
-
-class WtiCpm1600Driver(BaseWtiPduDriver):
-    MODEL_NAME = "WTI CPM-1600 Control Port Manager"
-    DEFAULT_CHANNEL_COUNT = 16
-    IP_SUFFIX = ".418"
-
-
-# ==========================================
-# WTI Specialty Series (PTS / TSM / RSM / NBB)
-# ==========================================
-
-class WtiPts4Hd20Driver(BaseWtiPduDriver):
-    MODEL_NAME = "WTI PTS-4HD20 Power Transfer Switch"
-    DEFAULT_CHANNEL_COUNT = 4
-    IP_SUFFIX = ".440"
-
-class WtiTsm8Driver(BaseWtiPduDriver):
-    MODEL_NAME = "WTI TSM-8 Terminal Server Manager"
-    DEFAULT_CHANNEL_COUNT = 8
-    IP_SUFFIX = ".448"
-
-class WtiRsm8Driver(BaseWtiPduDriver):
-    MODEL_NAME = "WTI RSM-8 Remote Site Manager"
-    DEFAULT_CHANNEL_COUNT = 8
-    IP_SUFFIX = ".449"
-
-class WtiNbb16Driver(BaseWtiPduDriver):
-    MODEL_NAME = "WTI NBB-16 Network Boot Bar"
-    DEFAULT_CHANNEL_COUNT = 16
-    IP_SUFFIX = ".460"
-
-
-# Registry mapping for all 16 WTI models
-WTI_MODELS = {
-    'wti_vmr_hd4d20': WtiVmrHd4d20Driver,
-    'wti_vmr_8hd20': WtiVmr8Hd20Driver,
-    'wti_vmr_16hd20': WtiVmr16Hd20Driver,
-    'wti_vmr_24hd20': WtiVmr24Hd20Driver,
-    'wti_nps_8hd20': WtiNps8Hd20Driver,
-    'wti_nps_16hd20': WtiNps16Hd20Driver,
-    'wti_nps_24hd20': WtiNps24Hd20Driver,
-    'wti_ips_400': WtiIps400Driver,
-    'wti_ips_800': WtiIps800Driver,
-    'wti_ips_1600': WtiIps1600Driver,
-    'wti_cpm_800': WtiCpm800Driver,
-    'wti_cpm_1600': WtiCpm1600Driver,
-    'wti_pts_4hd20': WtiPts4Hd20Driver,
-    'wti_tsm_8': WtiTsm8Driver,
-    'wti_rsm_8': WtiRsm8Driver,
-    'wti_nbb_16': WtiNbb16Driver,
-}
-
-for sig, driver_cls in WTI_MODELS.items():
-    registry.register('pdu', sig, driver_cls)
+def __getattr__(name):
+    if name == 'WTI_MODELS':
+        return _get_model_classes()
+    models = _get_model_classes()
+    for sig, cls in models.items():
+        if cls.__name__ == name:
+            return cls
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

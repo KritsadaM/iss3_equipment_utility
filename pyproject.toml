@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "iss3-equipment-utility"
+version = "1.0.0"
+description = "ISS3 Equipment Drivers – PDU, Terminal Server & DAQ control utilities"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+dependencies = [
+    "requests>=2.31,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "flake8",
+    "pytest",
+    "pytest-cov",
+]
+
+[project.scripts]
+iss-pdu-utility = "equipment_drivers.cli.pdu:main"
+iss-trial-utility = "equipment_drivers.cli.trial:main"
+iss-mock-server = "equipment_drivers.cli.mock_server:main"
+
+[tool.setuptools.packages.find]
+include = ["equipment_drivers*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.flake8]
+max-line-length = 127
+max-complexity = 10

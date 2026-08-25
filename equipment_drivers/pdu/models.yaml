@@ -1,0 +1,67 @@
+# Data-driven PDU model definitions.
+# Each vendor section maps a registry signature to its model attributes.
+# The base driver class for each vendor handles all protocol logic;
+# these entries only supply the per-model identity and matching info.
+
+apc:
+  apc_ap7900:  {model: "APC AP7900 Switched Rack PDU",  channels: 8,  suffix: ".50"}
+  apc_ap7901:  {model: "APC AP7901 Switched Rack PDU",  channels: 8,  suffix: ".501"}
+  apc_ap7902:  {model: "APC AP7902 Switched Rack PDU",  channels: 16, suffix: ".502"}
+  apc_ap7911:  {model: "APC AP7911 Switched Rack PDU",  channels: 16, suffix: ".511"}
+  apc_ap7920:  {model: "APC AP7920 Switched Rack PDU",  channels: 8,  suffix: ".51"}
+  apc_ap7921:  {model: "APC AP7921 Switched Rack PDU",  channels: 8,  suffix: ".52"}
+  apc_ap7922:  {model: "APC AP7922 Switched Rack PDU",  channels: 16, suffix: ".522"}
+  apc_ap7930:  {model: "APC AP7930 Switched Rack PDU",  channels: 24, suffix: ".530"}
+  apc_ap7931:  {model: "APC AP7931 Switched Rack PDU",  channels: 24, suffix: ".531"}
+  apc_ap7932:  {model: "APC AP7932 Switched Rack PDU",  channels: 24, suffix: ".532"}
+  apc_ap8930:  {model: "APC AP8930 Switched Rack PDU 2G",  channels: 24, suffix: ".590"}
+  apc_ap8932:  {model: "APC AP8932 Switched Rack PDU 2G",  channels: 24, suffix: ".592"}
+  apc_ap8941:  {model: "APC AP8941 Switched Rack PDU 2G",  channels: 24, suffix: ".53"}
+  apc_ap8953:  {model: "APC AP8953 Switched Rack PDU 2G",  channels: 24, suffix: ".553"}
+  apc_ap8958:  {model: "APC AP8958 Switched Rack PDU 2G",  channels: 20, suffix: ".558"}
+  apc_ap8959:  {model: "APC AP8959 Switched Rack PDU 2G",  channels: 28, suffix: ".54"}
+  apc_ap8959eu3: {model: "APC AP8959EU3 3-Phase Switched Rack PDU 2G", channels: 24, suffix: ".559"}
+  apc_ap8965:  {model: "APC AP8965 3-Phase Switched Rack PDU 2G", channels: 24, suffix: ".565"}
+  apc_ap8641:  {model: "APC AP8641 Switched Rack PDU with Outlet Metering", channels: 24, suffix: ".564"}
+  apc_ap8659:  {model: "APC AP8659 Switched Rack PDU with Outlet Metering", channels: 28, suffix: ".569"}
+
+wti:
+  wti_vmr_hd4d20: {model: "WTI VMR-HD4D20 C19",          channels: 20, suffix: ".40"}
+  wti_vmr_8hd20:  {model: "WTI VMR-8HD20 Switched PDU",   channels: 8,  suffix: ".408"}
+  wti_vmr_16hd20: {model: "WTI VMR-16HD20 Switched PDU",  channels: 16, suffix: ".41"}
+  wti_vmr_24hd20: {model: "WTI VMR-24HD20 Switched PDU",  channels: 24, suffix: ".424"}
+  wti_nps_8hd20:  {model: "WTI NPS-8HD20 Network Power Switch",  channels: 8,  suffix: ".42"}
+  wti_nps_16hd20: {model: "WTI NPS-16HD20 Network Power Switch", channels: 16, suffix: ".416"}
+  wti_nps_24hd20: {model: "WTI NPS-24HD20 Network Power Switch", channels: 24, suffix: ".425"}
+  wti_ips_400:    {model: "WTI IPS-400 Internet Power Switch",    channels: 4,  suffix: ".404"}
+  wti_ips_800:    {model: "WTI IPS-800 Internet Power Switch",    channels: 8,  suffix: ".43"}
+  wti_ips_1600:   {model: "WTI IPS-1600 Internet Power Switch",   channels: 16, suffix: ".417"}
+  wti_cpm_800:    {model: "WTI CPM-800 Control Port Manager",     channels: 8,  suffix: ".44"}
+  wti_cpm_1600:   {model: "WTI CPM-1600 Control Port Manager",    channels: 16, suffix: ".418"}
+  wti_pts_4hd20:  {model: "WTI PTS-4HD20 Power Transfer Switch",  channels: 4,  suffix: ".440"}
+  wti_tsm_8:      {model: "WTI TSM-8 Terminal Server Manager",    channels: 8,  suffix: ".448"}
+  wti_rsm_8:      {model: "WTI RSM-8 Remote Site Manager",        channels: 8,  suffix: ".449"}
+  wti_nbb_16:     {model: "WTI NBB-16 Network Boot Bar",          channels: 16, suffix: ".460"}
+
+raritan:
+  raritan_px2_5190r:  {model: "Raritan PX2-5190R Switched PDU",  channels: 8,  suffix: ".60"}
+  raritan_px2_5200r:  {model: "Raritan PX2-5200R Switched PDU",  channels: 8,  suffix: ".602"}
+  raritan_px2_5440:   {model: "Raritan PX2-5440 Switched PDU",   channels: 20, suffix: ".644"}
+  raritan_px2_5460:   {model: "Raritan PX2-5460 Switched PDU",   channels: 30, suffix: ".61"}
+  raritan_px2_5493:   {model: "Raritan PX2-5493 Switched PDU",   channels: 24, suffix: ".649"}
+  raritan_px2_5524:   {model: "Raritan PX2-5524 Switched PDU",   channels: 24, suffix: ".652"}
+  raritan_px2_5804:   {model: "Raritan PX2-5804 Switched PDU",   channels: 42, suffix: ".680"}
+  raritan_px2_1493:   {model: "Raritan PX2-1493 Switched PDU",   channels: 24, suffix: ".63"}
+  raritan_px3_5190r:  {model: "Raritan PX3-5190R Switched PDU",  channels: 8,  suffix: ".619"}
+  raritan_px3_5200r:  {model: "Raritan PX3-5200R Switched PDU",  channels: 8,  suffix: ".620"}
+  raritan_px3_5440:   {model: "Raritan PX3-5440 Switched PDU",   channels: 20, suffix: ".640"}
+  raritan_px3_5460:   {model: "Raritan PX3-5460 Switched PDU",   channels: 30, suffix: ".61"}
+  raritan_px3_5493:   {model: "Raritan PX3-5493 Switched PDU",   channels: 24, suffix: ".62"}
+  raritan_px3_5524:   {model: "Raritan PX3-5524 Switched PDU",   channels: 24, suffix: ".624"}
+  raritan_px3_5724:   {model: "Raritan PX3-5724 Switched PDU",   channels: 36, suffix: ".672"}
+  raritan_px3_5804:   {model: "Raritan PX3-5804 Switched PDU",   channels: 42, suffix: ".684"}
+  raritan_px3_5904:   {model: "Raritan PX3-5904 Switched PDU",   channels: 54, suffix: ".694"}
+  raritan_dpxr8a_16:  {model: "Raritan Dominion PX DPXR8A-16",   channels: 8,  suffix: ".64"}
+  raritan_dpxr12a_16: {model: "Raritan Dominion PX DPXR12A-16",  channels: 12, suffix: ".612"}
+  raritan_dpxr20a_16: {model: "Raritan Dominion PX DPXR20A-16",  channels: 20, suffix: ".616"}
+  raritan_dpxr20a_30: {model: "Raritan Dominion PX DPXR20A-30",  channels: 20, suffix: ".630"}
