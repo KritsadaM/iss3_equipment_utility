@@ -2,6 +2,7 @@ import logging
 from typing import Tuple
 from equipment_drivers.interfaces import DAQDriver
 from equipment_drivers.registry import registry
+from equipment_drivers.exceptions import EquipmentNotConnectedError
 
 logger = logging.getLogger(__name__)
 
@@ -28,19 +29,19 @@ class DummyDAQDriver(DAQDriver):
 
     def start_acquisition(self) -> Tuple[bool, str]:
         if not self.connected:
-            raise Exception("Not connected to DAQ")
+            raise EquipmentNotConnectedError("Not connected to DAQ")
         logger.info(f"Starting acquisition on Dummy DAQ")
         return True, "DUMMY_RAW: ACQ_STARTED"
 
     def stop_acquisition(self) -> Tuple[bool, str]:
         if not self.connected:
-            raise Exception("Not connected to DAQ")
+            raise EquipmentNotConnectedError("Not connected to DAQ")
         logger.info(f"Stopping acquisition on Dummy DAQ")
         return True, "DUMMY_RAW: ACQ_STOPPED"
 
     def get_status(self) -> Tuple[str, str]:
         if not self.connected:
-            raise Exception("Not connected to DAQ")
+            raise EquipmentNotConnectedError("Not connected to DAQ")
         logger.info(f"Checking status on Dummy DAQ")
         return "ACQUIRING", "DUMMY_RAW: STATUS=ACQUIRING"
 

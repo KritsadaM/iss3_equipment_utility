@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import Tuple, Optional
 from equipment_drivers.responses import PDUResponse
+from equipment_drivers.exceptions import EquipmentNotConnectedError
 
 class EquipmentDriver(ABC):
     @classmethod

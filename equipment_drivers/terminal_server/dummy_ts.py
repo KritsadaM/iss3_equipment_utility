@@ -2,6 +2,7 @@ import logging
 from typing import Tuple
 from equipment_drivers.interfaces import TerminalServerDriver
 from equipment_drivers.registry import registry
+from equipment_drivers.exceptions import EquipmentNotConnectedError
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,7 @@ class DummyTSDriver(TerminalServerDriver):
 
     def get_status(self) -> Tuple[str, str]:
         if not self.connected:
-            raise Exception("Not connected to Terminal Server")
+            raise EquipmentNotConnectedError("Not connected to Terminal Server")
         logger.info(f"Checking status on Dummy TS")
         raw_output = "DUMMY_RAW: TS ONLINE, 16 PORTS ACTIVE"
         return "ONLINE - 16 Ports Active", raw_output
