@@ -135,3 +135,12 @@ release: deb deb-engineering
 			$(PKG_ENG_NAME)_$(VERSION)-1_$(ARCH).deb \
 			--title "Release v$(VERSION)" --notes "Automated release of v$(VERSION) (Official & Engineering)"; \
 	fi
+# ==========================================================================
+# Protobuf codegen
+# ==========================================================================
+proto:
+	python3 -m grpc_tools.protoc \
+		-I proto \
+		--python_out=equipment_drivers/pb \
+		--pyi_out=equipment_drivers/pb \
+		proto/equipment/v1/equipment.proto

@@ -1,0 +1,71 @@
+syntax = "proto3";
+
+package equipment.v1;
+
+enum EquipmentType {
+  EQUIPMENT_TYPE_UNSPECIFIED = 0;
+  EQUIPMENT_TYPE_PDU = 1;
+  EQUIPMENT_TYPE_TERMINAL_SERVER = 2;
+  EQUIPMENT_TYPE_DAQ = 3;
+}
+
+enum Action {
+  ACTION_UNSPECIFIED = 0;
+  ACTION_TURN_ON = 1;
+  ACTION_TURN_OFF = 2;
+  ACTION_GET_STATUS = 3;
+  ACTION_START_ACQUISITION = 4;
+  ACTION_STOP_ACQUISITION = 5;
+}
+
+enum StatusCode {
+  STATUS_CODE_UNSPECIFIED = 0;
+  STATUS_CODE_ON = 1;
+  STATUS_CODE_OFF = 2;
+  STATUS_CODE_RUNNING = 3;
+  STATUS_CODE_STOPPED = 4;
+  STATUS_CODE_ERROR = 5;
+  STATUS_CODE_UNKNOWN = 6;
+}
+
+message PDUResponse {
+  bool success = 1;
+  Action action = 2;
+  int32 channel = 3;
+  string raw = 4;
+  StatusCode status = 5;
+  string status_text = 6;
+  string model = 7;
+}
+
+message TerminalServerResponse {
+  bool success = 1;
+  StatusCode status = 2;
+  string status_text = 3;
+  string raw = 4;
+  string model = 5;
+}
+
+message DAQResponse {
+  bool success = 1;
+  Action action = 2;
+  StatusCode status = 3;
+  string status_text = 4;
+  string raw = 5;
+  string model = 6;
+}
+
+message EquipmentEvent {
+  string event_id = 1;
+  int64 timestamp_unix_ms = 2;
+  string station_id = 3;
+  string ip_address = 4;
+  int32 port = 5;
+  EquipmentType equipment_type = 6;
+
+  oneof payload {
+    PDUResponse pdu_response = 10;
+    TerminalServerResponse terminal_server_response = 11;
+    DAQResponse daq_response = 12;
+  }
+}
