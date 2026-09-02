@@ -13,7 +13,7 @@ import equipment_drivers
 from equipment_drivers.discovery import discover_and_instantiate
 from equipment_drivers.registry import registry
 from equipment_drivers.channel_spec import parse_channels
-from equipment_drivers.simulator import MockPduServer, determine_vendor
+from equipment_drivers.simulator import MockPduServer, determine_vendor, determine_voltage
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger("pdu_utility")
@@ -55,21 +55,27 @@ def main():
                 logger.error(
                     f"Unknown model signature '{args.model}'. Use iss_trial_utility --list to see all signatures.")
                 sys.exit(1)
+            sig = args.model
         elif args.ip_address:
             driver_cls = type(discover_and_instantiate(args.ip_address, args.port, "pdu"))
+            sig = "apc_ap7900"
         else:
             driver_cls = registry.get_driver("pdu", "apc_ap7900")
+            sig = "apc_ap7900"
 
-        vendor = determine_vendor(args.model or "apc_ap7900", driver_cls)
+        vendor = determine_vendor(sig, driver_cls)
         temp_inst = driver_cls()
+        model_name = temp_inst.get_model()
         max_ch = temp_inst.get_max_channel()
+        voltage = determine_voltage(sig, model_name)
 
-        mock_server = MockPduServer(vendor=vendor, channel_count=max_ch)
+        mock_server = MockPduServer(vendor=vendor, channel_count=max_ch, model_name=model_name,
+                                    model_signature=sig, voltage=voltage)
         mock_server.start()
         target_ip = mock_server.host
         target_port = mock_server.port
         driver = driver_cls()
-        print(f"[MOCK] Simulating {driver.get_model()} via local server {target_ip}:{target_port}")
+        print(f"[MOCK] Simulating {model_name} via local server {target_ip}:{target_port}")
     else:
         target_ip = args.ip_address
         target_port = args.port

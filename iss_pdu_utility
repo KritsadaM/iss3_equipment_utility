@@ -7,7 +7,14 @@ import logging
 # Ensure the equipment_drivers package is loaded
 import equipment_drivers
 from equipment_drivers.discovery import discover_and_instantiate
+from equipment_drivers.registry import registry
 from equipment_drivers.channel_spec import parse_channels
+
+try:
+    from equipment_drivers.simulator import MockPduServer, determine_vendor, determine_voltage
+    HAS_MOCK = True
+except ImportError:
+    HAS_MOCK = False
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger("pdu_utility")
@@ -15,8 +22,10 @@ logger = logging.getLogger("pdu_utility")
 
 def main():
     parser = argparse.ArgumentParser(description="PDU Control Utility")
-    parser.add_argument("--ip_address", required=True, help="IP address of the PDU")
+    parser.add_argument("--ip_address", default=None, help="IP address of the PDU (required unless --mock is used)")
     parser.add_argument("--port", type=int, default=161, help="Port of the PDU (default: 161)")
+    parser.add_argument("--mock", action="store_true", help="Run against an internal mock PDU simulator (Engineering mode)")
+    parser.add_argument("--model", type=str, default=None, help="Explicit driver signature when using --mock (e.g. apc_ap7900, wti_vmr_hd4d20, raritan_px3_5460)")
     parser.add_argument("--username", default=None,
                         help="Username override for the PDU (falls back to PDU_USERNAME env var, then driver default)")
     parser.add_argument("--password", default=None,
@@ -28,17 +37,56 @@ def main():
                              "'3, 4, 5'), a range (3-6), a combination (1,3-5,8), or 'all'")
 
     args = parser.parse_args()
+
+    if args.mock:
+        if not HAS_MOCK:
+            logger.error("--mock is an engineering feature and is not included in official production packages.")
+            sys.exit(1)
+    elif not args.ip_address:
+        parser.error("the following arguments are required: --ip_address (unless --mock is used)")
+
     username = args.username or os.environ.get("PDU_USERNAME")
     password = args.password or os.environ.get("PDU_PASSWORD")
 
-    # Discover and instantiate driver
-    driver = discover_and_instantiate(args.ip_address, args.port, "pdu")
-    if not driver:
-        logger.error("Failed to detect PDU model or find suitable driver.")
-        sys.exit(1)
+    mock_server = None
+
+    if args.mock:
+        if args.model:
+            driver_cls = registry.get_driver("pdu", args.model)
+            if not driver_cls:
+                logger.error(f"Unknown model signature '{args.model}'. Use iss_trial_utility --list to see all signatures.")
+                sys.exit(1)
+            sig = args.model
+        elif args.ip_address:
+            driver_cls = type(discover_and_instantiate(args.ip_address, args.port, "pdu"))
+            sig = "apc_ap7900"
+        else:
+            driver_cls = registry.get_driver("pdu", "apc_ap7900")
+            sig = "apc_ap7900"
+
+        vendor = determine_vendor(sig, driver_cls)
+        temp_inst = driver_cls()
+        model_name = temp_inst.get_model()
+        max_ch = temp_inst.get_max_channel()
+        voltage = determine_voltage(sig, model_name)
+
+        mock_server = MockPduServer(vendor=vendor, channel_count=max_ch, model_name=model_name,
+                                    model_signature=sig, voltage=voltage)
+        mock_server.start()
+        target_ip = mock_server.host
+        target_port = mock_server.port
+        driver = driver_cls()
+        print(f"[MOCK] Simulating {model_name} via local server {target_ip}:{target_port}")
+    else:
+        target_ip = args.ip_address
+        target_port = args.port
+        driver = discover_and_instantiate(target_ip, target_port, "pdu")
+        if not driver:
+            logger.error("Failed to detect PDU model or find suitable driver.")
+            sys.exit(1)
 
     try:
-        connected = driver.connect(args.ip_address, args.port, username=username, password=password)
+        connected = driver.connect(target_ip, target_port, username=username, password=password)
         if not connected:
             logger.error("Failed to connect to PDU.")
             sys.exit(1)
@@ -90,6 +138,8 @@ def main():
         sys.exit(1)
     finally:
         driver.disconnect()
+        if mock_server:
+            mock_server.stop()
 
 
 if __name__ == "__main__":
