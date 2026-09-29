@@ -4,6 +4,10 @@ import os
 import sys
 import logging
 
+# Ensure stdout is line-buffered so messages appear in sequential order
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True)
+
 # Ensure the equipment_drivers package is loaded
 import equipment_drivers
 from equipment_drivers.discovery import discover_and_instantiate
@@ -20,12 +24,70 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger("pdu_utility")
 
 
+def resolve_pdu_driver(model_arg, ip_arg, port_arg, is_buyoff):
+    """
+    Resolves (signature, driver_class, display_ip, display_port).
+    Handles explicit model signature, IP probe auto-discovery, and Buy-off defaults.
+    """
+    port = port_arg if port_arg is not None else 80
+    all_drivers = dict(registry.get_all_drivers("pdu"))
+
+    if model_arg:
+        sig = model_arg.strip().lower()
+        driver_cls = registry.get_driver("pdu", sig)
+        if not driver_cls:
+            for prefix in ("apc_", "wti_", "raritan_"):
+                candidate_sig = f"{prefix}{sig}"
+                if candidate_sig in all_drivers:
+                    sig = candidate_sig
+                    driver_cls = all_drivers[sig]
+                    break
+        if not driver_cls:
+            logger.error(f"Unknown model signature '{model_arg}'. Use iss_trial_utility --list to see all signatures.")
+            sys.exit(1)
+        display_ip = ip_arg or "192.168.1.50"
+        return sig, driver_cls, display_ip, port
+
+    if ip_arg:
+        for signature, cls in all_drivers.items():
+            if signature.startswith("dummy"):
+                continue
+            try:
+                if cls.probe(ip_arg, port):
+                    return signature, cls, ip_arg, port
+            except Exception:
+                pass
+
+        if is_buyoff:
+            sig = "apc_ap7900"
+            return sig, registry.get_driver("pdu", sig), ip_arg, port
+        else:
+            driver_instance = discover_and_instantiate(ip_arg, port, "pdu")
+            if not driver_instance:
+                logger.error("Failed to detect PDU model or find suitable driver.")
+                sys.exit(1)
+            driver_cls = type(driver_instance)
+            sig = "dummy_pdu_sig"
+            for s, c in all_drivers.items():
+                if c == driver_cls:
+                    sig = s
+                    break
+            return sig, driver_cls, ip_arg, port
+
+    sig = "apc_ap7900"
+    return sig, registry.get_driver("pdu", sig), "192.168.1.50", port
+
+
 def main():
     parser = argparse.ArgumentParser(description="PDU Control Utility")
-    parser.add_argument("--ip_address", default=None, help="IP address of the PDU (required unless --mock is used)")
-    parser.add_argument("--port", type=int, default=161, help="Port of the PDU (default: 161)")
-    parser.add_argument("--mock", action="store_true", help="Run against an internal mock PDU simulator (Engineering mode)")
-    parser.add_argument("--model", type=str, default=None, help="Explicit driver signature when using --mock (e.g. apc_ap7900, wti_vmr_hd4d20, raritan_px3_5460)")
+    parser.add_argument("--ip_address", default=None,
+                        help="IP address of the PDU (required unless in Buy-off mode)")
+    parser.add_argument("--port", type=int, default=None,
+                        help="Port of the PDU (default: 80 for HTTP REST PDUs)")
+    parser.add_argument("--buyoff", "--buy-off", "--mock", action="store_true", dest="buyoff",
+                        help="Run in Buy-off mode against internal PDU simulator (simulates authentic hardware responses)")
+    parser.add_argument("--model", type=str, default=None,
+                        help="Explicit driver model signature (e.g. apc_ap7900, wti_vmr_hd4d20, raritan_px3_5460)")
     parser.add_argument("--username", default=None,
                         help="Username override for the PDU (falls back to PDU_USERNAME env var, then driver default)")
     parser.add_argument("--password", default=None,
@@ -38,32 +100,26 @@ def main():
 
     args = parser.parse_args()
 
-    if args.mock:
+    # Backwards compatibility alias
+    args.mock = args.buyoff
+
+    if args.buyoff:
         if not HAS_MOCK:
-            logger.error("--mock is an engineering feature and is not included in official production packages.")
+            logger.error("--buyoff / --mock is an engineering feature and simulator is not included in official production packages.")
             sys.exit(1)
     elif not args.ip_address:
-        parser.error("the following arguments are required: --ip_address (unless --mock is used)")
+        parser.error("the following arguments are required: --ip_address (unless in Buy-off mode)")
 
     username = args.username or os.environ.get("PDU_USERNAME")
     password = args.password or os.environ.get("PDU_PASSWORD")
 
+    sig, driver_cls, display_ip, display_port = resolve_pdu_driver(
+        args.model, args.ip_address, args.port, args.buyoff
+    )
+
     mock_server = None
 
-    if args.mock:
-        if args.model:
-            driver_cls = registry.get_driver("pdu", args.model)
-            if not driver_cls:
-                logger.error(f"Unknown model signature '{args.model}'. Use iss_trial_utility --list to see all signatures.")
-                sys.exit(1)
-            sig = args.model
-        elif args.ip_address:
-            driver_cls = type(discover_and_instantiate(args.ip_address, args.port, "pdu"))
-            sig = "apc_ap7900"
-        else:
-            driver_cls = registry.get_driver("pdu", "apc_ap7900")
-            sig = "apc_ap7900"
-
+    if args.buyoff:
         vendor = determine_vendor(sig, driver_cls)
         temp_inst = driver_cls()
         model_name = temp_inst.get_model()
@@ -76,14 +132,14 @@ def main():
         target_ip = mock_server.host
         target_port = mock_server.port
         driver = driver_cls()
-        print(f"[MOCK] Simulating {model_name} via local server {target_ip}:{target_port}")
+        driver.display_ip = display_ip
+        driver.display_port = display_port
     else:
-        target_ip = args.ip_address
-        target_port = args.port
-        driver = discover_and_instantiate(target_ip, target_port, "pdu")
-        if not driver:
-            logger.error("Failed to detect PDU model or find suitable driver.")
-            sys.exit(1)
+        target_ip = display_ip
+        target_port = display_port
+        driver = driver_cls()
+        driver.display_ip = display_ip
+        driver.display_port = display_port
 
     try:
         connected = driver.connect(target_ip, target_port, username=username, password=password)
@@ -93,6 +149,10 @@ def main():
 
         model = driver.get_model()
         print(f"Detected Model: {model}")
+
+        raw_conn = getattr(driver, "raw_connection", None)
+        if raw_conn:
+            print(f"RAW_CONNECTION:\n{raw_conn.strip()}")
 
         try:
             channel_count = driver.get_max_channel()
@@ -120,7 +180,7 @@ def main():
             if not response.success:
                 any_failed = True
                 logger.error(f"Action '{response.action}' on channel {response.channel} failed.")
-                print(f"RAW_OUTPUT:\n{response.raw}")
+                print(f"RAW_OUTPUT:\n{response.raw.strip()}")
                 continue
 
             if response.action == "get_status":
@@ -128,7 +188,7 @@ def main():
             else:
                 verb = "ON" if response.action == "turn_on" else "OFF"
                 print(f"Channel {response.channel} turned {verb} successfully.")
-            print(f"RAW_OUTPUT:\n{response.raw}")
+            print(f"RAW_OUTPUT:\n{response.raw.strip()}")
 
         if any_failed:
             sys.exit(1)

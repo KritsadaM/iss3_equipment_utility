@@ -11,17 +11,32 @@ class DummyPDUDriver(PDUDriver):
         self.ip = ""
         self.port = 0
         self.connected = False
+        self.raw_connection = None
+        self.display_ip = None
+        self.display_port = None
 
     def connect(self, ip: str, port: int, username: str = None, password: str = None) -> bool:
         self.ip = ip
         self.port = port
         self.connected = True
-        logger.info(f"Connected to Dummy PDU at {ip}:{port}")
+        disp_ip = getattr(self, "display_ip", None) or self.ip
+        disp_port = getattr(self, "display_port", None) or self.port
+        import json
+        self.raw_connection = json.dumps({
+            "model": self.get_model(),
+            "status": "operational",
+            "ip": disp_ip,
+            "port": disp_port,
+            "outlets": self.get_channel_count()
+        }, indent=2)
+        logger.info(f"Connected to Dummy PDU at {disp_ip}:{disp_port}")
         return True
 
     def disconnect(self) -> bool:
         self.connected = False
-        logger.info(f"Disconnected from Dummy PDU at {self.ip}:{self.port}")
+        disp_ip = getattr(self, "display_ip", None) or self.ip
+        disp_port = getattr(self, "display_port", None) or self.port
+        logger.info(f"Disconnected from Dummy PDU at {disp_ip}:{disp_port}")
         return True
 
     def get_model(self) -> str:
