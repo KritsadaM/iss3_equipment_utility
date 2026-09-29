@@ -4,6 +4,10 @@ from equipment_drivers.responses import PDUResponse
 from equipment_drivers.exceptions import EquipmentNotConnectedError
 
 class EquipmentDriver(ABC):
+    raw_connection: Optional[str] = None
+    display_ip: Optional[str] = None
+    display_port: Optional[int] = None
+
     @classmethod
     def probe(cls, ip: str, port: int) -> bool:
         """
