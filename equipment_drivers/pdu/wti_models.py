@@ -9,6 +9,18 @@ from equipment_drivers.exceptions import EquipmentConnectionError, EquipmentComm
 logger = logging.getLogger(__name__)
 
 
+def _scheme(port: int, use_https: Optional[bool]) -> str:
+    if use_https is None:
+        return "https" if port == 443 else "http"
+    return "https" if use_https else "http"
+
+
+def _tls_hint(error: Exception) -> str:
+    if isinstance(error, requests.exceptions.SSLError):
+        return " (if the PDU uses a self-signed certificate, retry with --insecure)"
+    return ""
+
+
 def _status_ok(data) -> bool:
     """WTI wraps every reply in {"status": {"code": "0", "text": "OK"}, ...}; code "0" means success."""
     status = data.get("status") if isinstance(data, dict) else None
@@ -30,14 +42,19 @@ class BaseWtiPduDriver(PDUDriver):
     DEFAULT_CHANNEL_COUNT = 8
     DEFAULT_PORT = 80
     IP_SUFFIX = ""
+    # None: HTTPS only on port 443. True/False forces it on any port.
+    use_https: Optional[bool] = None
+    # False skips TLS certificate checks (PDUs usually ship self-signed certificates).
+    verify_tls: bool = True
 
     def __init__(self):
         self.ip = ""
         self.port = self.DEFAULT_PORT
         self.base_url = ""
         self.connected = False
-        self.username = "admin"
-        self.password = "admin"
+        # WTI factory default (https://wti.com/blogs/knowledge-base/changing-the-default-password)
+        self.username = "super"
+        self.password = "super"
         self.auth = HTTPBasicAuth(self.username, self.password)
         self.session = requests.Session()
         self.timeout = 5
@@ -49,12 +66,40 @@ class BaseWtiPduDriver(PDUDriver):
             return ip.endswith(cls.IP_SUFFIX)
         return False
 
+    @classmethod
+    def identify(cls, ip: str, port: Optional[int] = None, username: Optional[str] = None,
+                 password: Optional[str] = None, timeout: float = 3.0,
+                 use_https: Optional[bool] = None, verify_tls: bool = True) -> Optional[str]:
+        """
+        Ask the device what it is. Returns the `product` the unit reports in
+        /api/v2/status/status (e.g. "VMR-HD4D20"), "" if it is a WTI unit that
+        didn't report one, or None if the device doesn't answer the WTI API.
+        """
+        defaults = cls()
+        port = port or (443 if use_https else cls.DEFAULT_PORT)
+        scheme = _scheme(port, use_https)
+        auth = HTTPBasicAuth(username or defaults.username, password or defaults.password)
+        try:
+            response = defaults.session.get(f"{scheme}://{ip}:{port}/api/v2/status/status", auth=auth,
+                                            timeout=timeout, verify=verify_tls)
+            response.raise_for_status()
+            data = response.json()
+        except (requests.exceptions.RequestException, ValueError) as e:
+            logger.debug(f"WTI identify: no WTI API at {ip}:{port}: {e}")
+            return None
+        finally:
+            defaults.session.close()
+        if not _status_ok(data) or str(data.get("vendor", "")).lower() != "wti":
+            return None
+        return str(data.get("product", ""))
+
     def connect(self, ip: str, port: Optional[int] = None, username: Optional[str] = None,
                 password: Optional[str] = None) -> bool:
         self.ip = ip
-        self.port = port or self.DEFAULT_PORT
-        self.scheme = "https" if self.port == 443 else self.scheme
+        self.port = port or (443 if self.use_https else self.DEFAULT_PORT)
+        self.scheme = _scheme(self.port, self.use_https)
         self.base_url = f"{self.scheme}://{self.ip}:{self.port}/api/v2"
+        self.session.verify = self.verify_tls
 
         if username is not None:
             self.username = username
@@ -74,7 +119,7 @@ class BaseWtiPduDriver(PDUDriver):
             return True
         except requests.exceptions.RequestException as e:
             logger.error(f"Failed to connect to {self.get_model()} at {disp_ip}:{disp_port}: {e}")
-            raise EquipmentConnectionError(f"Connection to WTI PDU failed: {e}")
+            raise EquipmentConnectionError(f"Connection to WTI PDU failed: {e}{_tls_hint(e)}")
 
     def disconnect(self) -> bool:
         self.session.close()
@@ -96,6 +141,9 @@ class BaseWtiPduDriver(PDUDriver):
             plugs = response.json().get("powerplugs")
             if isinstance(plugs, list) and plugs:
                 return len(plugs)
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            # The device stopped answering; don't retry with a guessed count.
+            raise EquipmentConnectionError(f"WTI PDU stopped responding: {e}")
         except Exception as e:
             logger.warning(f"Could not query channel count from {self.get_model()}, falling back to default: {e}")
         return self.DEFAULT_CHANNEL_COUNT

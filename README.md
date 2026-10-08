@@ -96,6 +96,22 @@ PDU_USERNAME=admin PDU_PASSWORD=secret iss_pdu_utility --ip_address 192.168.1.40
 
 Precedence: `--username`/`--password` flag → `PDU_USERNAME`/`PDU_PASSWORD` env var (`TS_*` / `DAQ_*` for the other two utilities) → the driver's own built-in default, if it has one.
 
+Built-in defaults are the vendors' factory credentials:
+
+| Vendor | Default username / password |
+|---|---|
+| APC | `apc` / `apc` |
+| WTI | `super` / `super` ([WTI KB](https://wti.com/blogs/knowledge-base/changing-the-default-password)) |
+| Raritan | `admin` / `raritan` |
+
+### HTTPS
+
+WTI and Raritan use HTTPS automatically on port 443. Use `--https` to force HTTPS on any other port; without `--port` it then defaults to 443. Most PDUs ship with a self-signed certificate, which fails verification. Add `--insecure` to skip the check:
+
+```bash
+iss_pdu_utility --ip_address 192.168.1.40 --https --insecure status all
+```
+
 ## How it works
 
 ```
@@ -115,8 +131,17 @@ equipment_drivers/
     └── dummy_daq.py
 ```
 
-1. **Discovery** (`discover_and_instantiate`) asks every driver registered under the requested equipment type, in turn, "is this you?" via a `probe(ip, port)` classmethod. The first driver to say yes gets instantiated.
-2. Drivers registered under the conventional `dummy_{equipment_type}_sig` signature are held back and used only as a last-resort fallback if nothing else matches — useful in dev/test, but something to phase out per equipment type once every real vendor has a working `probe()`.
+1. **Discovery** (`discover_and_instantiate`) first **asks the device what it is**, trying every vendor's protocol in parallel (3 s each):
+
+   | Vendor | How the model is read |
+   |---|---|
+   | APC | SSH login banner says "Network Management Card", then `prodInfo` → `Model:` |
+   | WTI | `GET /api/v2/status/status` → `product` |
+   | Raritan | JSON-RPC `getMetaData` → `nameplate.model` |
+
+   The reported part number is matched to a model in `models.yaml` (e.g. `AP7920B` → `apc_ap7920`). If a known vendor reports a model that isn't listed, a generic driver for that vendor is used and the outlet count is read from the device. This needs the right credentials (`--username`/`--password` or `PDU_USERNAME`/`PDU_PASSWORD`).
+2. If no device answers, discovery falls back to the IP-address convention: each driver's `probe(ip, port)` (today, the `suffix` in `models.yaml`), and logs a warning that it guessed.
+3. Drivers registered under the conventional `dummy_{equipment_type}_sig` signature are used only as a last resort if nothing else matches.
 3. Once a driver is instantiated, the utility calls `connect()`, runs the requested action, and calls `disconnect()`.
 
 ### PDU responses
@@ -132,6 +157,36 @@ response = driver.turn_on(3)
 # response.success, response.action, response.channel, response.raw, response.status, response.model
 ```
 
+### Machine-readable output
+
+`--json` prints one JSON document instead of the text lines:
+- `model`, `ip_address`, `port`
+- `raw_connection`
+- `results`: one entry per channel, with `success`, `status`, `raw`, and `verify` when `--verify` is used
+- `errors`: every ERROR log line from the run
+- `success`
+
+It always prints the document, even when no PDU answers, so scripts don't have to scrape the text output.
+
+`--event-dir DIR` writes one protobuf `EquipmentEvent` (`proto/equipment/v1/equipment.proto`) per channel result as `DIR/<event_id>.pb`, taking `station_id` from `$STATION_ID`. It needs the `protobuf` package (`pip install '.[events]'`).
+
+```bash
+iss_pdu_utility --ip_address 192.168.1.40 --json status all | jq '.results[] | {channel, status}'
+STATION_ID=PPTR-V2-004 iss_pdu_utility --ip_address 192.168.1.40 --event-dir /var/spool/iss3-events off 3
+```
+
+### Capturing real device output
+
+Add `--capture DIR` to any real-device run. It records every exchange with the PDU, including the identification step, into `DIR/<timestamp>-<ip>/`:
+- `exchanges.jsonl`: the request, HTTP status, timing and errors for each exchange.
+- `NNN-<what>.json|.txt`: each reply exactly as the device sent it.
+
+```bash
+PDU_PASSWORD=... iss_pdu_utility --ip_address 192.168.1.40 --capture captures status all
+```
+
+Passwords, `Authorization` headers and `user:pass@` in URLs are never recorded. The reply files can be copied into `tests/fixtures/<vendor>/` in place of the documentation-derived samples, so the tests check the drivers against real hardware.
+
 ### Mock / engineering tools
 
 Without hardware, the engineering package can simulate every PDU model. APC is served as an SSH CLI, WTI and Raritan as HTTP APIs. The response formats follow vendor documentation, see `tests/fixtures/README.md` for sources.
@@ -140,6 +195,30 @@ Without hardware, the engineering package can simulate every PDU model. APC is s
 iss_pdu_utility_eng --mock --model apc_ap7900 status all   # in-process mock
 iss_trial_utility --all                                    # 9-step trial of every model
 iss_mock_server --vendor apc                               # standalone: ssh -p 2222 apc@127.0.0.1
+```
+
+#### Simulating faults
+
+The mock can misbehave on purpose so error handling can be tested without hardware:
+
+| `--fault` | The simulated PDU... |
+|---|---|
+| `auth_fail` | rejects every login (HTTP 401 / SSH auth failure) |
+| `timeout` | accepts the connection, then never answers a command |
+| `drop` | accepts the connection, then drops it on the first command |
+| `command_error` | answers outlet commands with the vendor's error reply (`E100`, WTI status code ≠ 0, Raritan `_ret_` ≠ 0) |
+| `stuck_outlet` | reports outlet commands as successful but never changes outlet state |
+
+```bash
+iss_pdu_utility --buyoff --model wti_vmr_hd4d20 --fault timeout off 1   # see what operators would see
+iss_mock_server --vendor raritan --fault drop                            # standalone faulty PDU
+iss_trial_utility --all --faults                                          # every model x every fault
+```
+
+`stuck_outlet` is the one fault a plain `on`/`off` can't detect: the PDU claims success, so the utility exits 0. Add `--verify` to read each outlet back after switching it. It retries up to 3 reads, 1 s apart, and exits 1 if the outlet never reports the new state:
+
+```bash
+iss_pdu_utility --ip_address 192.168.1.40 --verify off 3
 ```
 
 ## Adding a new driver

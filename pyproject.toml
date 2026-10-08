@@ -14,14 +14,20 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# --event-dir (protobuf EquipmentEvent output)
+events = [
+    "protobuf>=7.35.1,<8",
+]
 dev = [
     "flake8",
     "pytest",
     "pytest-cov",
+    "protobuf>=7.35.1,<8",
 ]
 
 [project.scripts]
 iss-pdu-utility = "equipment_drivers.cli.pdu:main"
+iss-pdu-utility-eng = "equipment_drivers.cli.pdu:main_engineering"
 iss-trial-utility = "equipment_drivers.cli.trial:main"
 iss-mock-server = "equipment_drivers.cli.mock_server:main"
 

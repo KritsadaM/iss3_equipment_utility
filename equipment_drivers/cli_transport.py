@@ -47,6 +47,7 @@ class SshCliTransport:
         self._client.set_missing_host_key_policy(_log_unknown_host_key_policy(paramiko))
         try:
             self._client.connect(host, port=port, username=username, password=password, timeout=timeout,
+                                 banner_timeout=timeout, auth_timeout=timeout,
                                  look_for_keys=False, allow_agent=False)
             self._chan = self._client.invoke_shell(width=200, height=1000)
             self._chan.settimeout(timeout)
@@ -95,7 +96,7 @@ class SshCliTransport:
             except socket.timeout:
                 break
             if not chunk:
-                break
+                raise EquipmentConnectionError(f"Connection closed by device; received: {buf[-200:]!r}")
             buf += chunk.decode("utf-8", errors="replace")
             normalized = buf.replace("\r\n", "\n").replace("\r", "\n")
             if self._prompt_re.search(normalized):

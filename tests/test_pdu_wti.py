@@ -28,7 +28,7 @@ class TestWtiDrivers(unittest.TestCase):
         self.driver_hd20.base_url = f"http://{self.ip}:{self.port}/api/v2"
 
     def test_all_wti_models_registered_and_configured(self):
-        self.assertEqual(len(WTI_MODELS), 16)
+        self.assertEqual(len(WTI_MODELS), 14)
         for sig, driver_cls in WTI_MODELS.items():
             driver = driver_cls()
             self.assertTrue(driver.get_model().startswith("WTI"))

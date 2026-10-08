@@ -1,0 +1,23 @@
+Schneider Electric                      Network Management Card AOS      v6.9.6
+(c) Copyright 2020 All Rights Reserved  RPDU 2g APP                      v6.9.6
+-------------------------------------------------------------------------------
+Name      : apc566BF4                                 Date : 07/07/2022
+Contact   : Unknown                                   Time : 01:18:18
+Location  : Unknown                                   User : Super User
+Up Time   : 0 Days 12 Hours 17 Minutes                Stat : P+ N4+ N6+ A+
+-------------------------------------------------------------------------------
+IPv4               : Enabled            IPv6               : Enabled
+Ping Response      : Enabled
+-------------------------------------------------------------------------------
+HTTP               : Disabled           HTTPS              : Enabled
+FTP                : Disabled           Telnet             : Disabled
+SSH/SCP            : Enabled            SNMPv1             : Disabled
+SNMPv3             : Disabled
+-------------------------------------------------------------------------------
+Super User         : Enabled            RADIUS             : Disabled
+Administrator      : Disabled           Device User        : Disabled
+Read-Only User     : Disabled           Network-Only User  : Disabled
+
+
+Type ? for command listing
+Use tcpip command for IP address(-i), subnet(-s), and gateway(-g)

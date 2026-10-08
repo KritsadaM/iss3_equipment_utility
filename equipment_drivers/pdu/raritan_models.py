@@ -6,6 +6,7 @@ from requests.auth import HTTPBasicAuth, HTTPDigestAuth
 from equipment_drivers.interfaces import PDUDriver
 from equipment_drivers.responses import PDUResponse
 from equipment_drivers.exceptions import EquipmentConnectionError, EquipmentCommandError, EquipmentNotConnectedError
+from equipment_drivers.pdu.wti_models import _scheme, _tls_hint
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,10 @@ class BaseRaritanPduDriver(PDUDriver):
     DEFAULT_CHANNEL_COUNT = 8
     DEFAULT_PORT = 80
     IP_SUFFIX = ""
+    # None: HTTPS only on port 443. True/False forces it on any port.
+    use_https: Optional[bool] = None
+    # False skips TLS certificate checks (PDUs usually ship self-signed certificates).
+    verify_tls: bool = True
 
     def __init__(self):
         self.ip = ""
@@ -66,37 +71,69 @@ class BaseRaritanPduDriver(PDUDriver):
             raise EquipmentCommandError(f"Raritan {method} on {rid} failed: {err.get('code')} {err.get('message')}")
         return data.get("result", {}).get("_ret_"), response.text
 
-    def connect(self, ip: str, port: Optional[int] = None, username: Optional[str] = None,
-                password: Optional[str] = None) -> bool:
+    def _set_endpoint(self, ip: str, port: Optional[int], username: Optional[str], password: Optional[str]):
         self.ip = ip
-        self.port = port or self.DEFAULT_PORT
-        self.scheme = "https" if self.port == 443 else self.scheme
+        self.port = port or (443 if self.use_https else self.DEFAULT_PORT)
+        self.scheme = _scheme(self.port, self.use_https)
         self.base_url = f"{self.scheme}://{self.ip}:{self.port}"
-
+        self.session.verify = self.verify_tls
         if username is not None:
             self.username = username
         if password is not None:
             self.password = password
         self.auth = HTTPDigestAuth(self.username, self.password)
 
+    def _get_metadata(self) -> Tuple[Any, str]:
+        """getMetaData on the PDU, retrying with Basic auth if Digest is refused."""
+        try:
+            return self._rpc("/model/pdu/0", "getMetaData")
+        except requests.exceptions.HTTPError as e:
+            if e.response is None or e.response.status_code != 401:
+                raise
+            self.auth = HTTPBasicAuth(self.username, self.password)
+            return self._rpc("/model/pdu/0", "getMetaData")
+
+    @classmethod
+    def identify(cls, ip: str, port: Optional[int] = None, username: Optional[str] = None,
+                 password: Optional[str] = None, timeout: float = 3.0,
+                 use_https: Optional[bool] = None, verify_tls: bool = True) -> Optional[str]:
+        """
+        Ask the device what it is. Returns nameplate.model from getMetaData
+        (e.g. "PX3-5460"), "" if it is a Xerus PDU that didn't report one, or
+        None if the device doesn't answer the Xerus JSON-RPC API.
+        """
+        probe = cls()
+        probe.timeout = timeout
+        probe.use_https = use_https
+        probe.verify_tls = verify_tls
+        probe._set_endpoint(ip, port, username, password)
+        try:
+            metadata, _ = probe._get_metadata()
+        except (requests.exceptions.RequestException, EquipmentCommandError) as e:
+            logger.debug(f"Raritan identify: no Xerus API at {ip}:{probe.port}: {e}")
+            return None
+        finally:
+            probe.session.close()
+        if not isinstance(metadata, dict) or not isinstance(metadata.get("nameplate"), dict):
+            return None
+        return str(metadata["nameplate"].get("model", ""))
+
+    def connect(self, ip: str, port: Optional[int] = None, username: Optional[str] = None,
+                password: Optional[str] = None) -> bool:
+        self._set_endpoint(ip, port, username, password)
+
         disp_ip = getattr(self, "display_ip", None) or self.ip
         disp_port = getattr(self, "display_port", None) or self.port
 
         try:
-            try:
-                _, raw = self._rpc("/model/pdu/0", "getMetaData")
-            except requests.exceptions.HTTPError as e:
-                if e.response is None or e.response.status_code != 401:
-                    raise
-                self.auth = HTTPBasicAuth(self.username, self.password)
-                _, raw = self._rpc("/model/pdu/0", "getMetaData")
+            _, raw = self._get_metadata()
             self.connected = True
             self.raw_connection = raw
             logger.info(f"Connected to {self.get_model()} at {disp_ip}:{disp_port}")
             return True
         except (requests.exceptions.RequestException, EquipmentCommandError) as e:
             logger.error(f"Failed to connect to {self.get_model()} at {disp_ip}:{disp_port}: {e}")
-            raise EquipmentConnectionError(f"Connection to Raritan PDU failed: {e}")
+            raise EquipmentConnectionError(f"Connection to Raritan PDU failed: {e}{_tls_hint(e)}")
 
     def disconnect(self) -> bool:
         self.session.close()
@@ -116,6 +153,9 @@ class BaseRaritanPduDriver(PDUDriver):
             outlets, _ = self._rpc("/model/pdu/0", "getOutlets")
             if isinstance(outlets, list) and outlets:
                 return len(outlets)
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            # The device stopped answering; don't retry with a guessed count.
+            raise EquipmentConnectionError(f"Raritan PDU stopped responding: {e}")
         except Exception as e:
             logger.warning(f"Could not query outlet count from {self.get_model()}, falling back to default: {e}")
         return self.DEFAULT_CHANNEL_COUNT
