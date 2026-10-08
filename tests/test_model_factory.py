@@ -18,9 +18,9 @@ class TestModelsYaml(unittest.TestCase):
         data = _load_models()
         self.assertEqual(len(data["apc"]), 20)
 
-    def test_wti_has_16_models(self):
+    def test_wti_has_14_models(self):
         data = _load_models()
-        self.assertEqual(len(data["wti"]), 16)
+        self.assertEqual(len(data["wti"]), 14)
 
     def test_raritan_has_21_models(self):
         data = _load_models()
@@ -73,8 +73,8 @@ class TestRegistryIntegrity(unittest.TestCase):
 
     def test_total_pdu_drivers_registered(self):
         drivers = registry.get_all_drivers("pdu")
-        # 57 from YAML + 1 dummy = 58
-        self.assertGreaterEqual(len(drivers), 58)
+        # 55 from YAML + 1 dummy = 56
+        self.assertGreaterEqual(len(drivers), 56)
 
     def test_each_registered_driver_is_instantiable(self):
         for sig, cls in registry.get_all_drivers("pdu"):

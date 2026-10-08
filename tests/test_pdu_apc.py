@@ -54,8 +54,8 @@ class TestApcModels(unittest.TestCase):
         self.assertEqual(APC_MODELS['apc_ap7902']().get_max_channel(), 16)
         self.assertEqual(APC_MODELS['apc_ap7930']().get_max_channel(), 24)
         self.assertEqual(APC_MODELS['apc_ap8941']().get_max_channel(), 24)
-        self.assertEqual(APC_MODELS['apc_ap8959']().get_max_channel(), 28)
-        self.assertEqual(APC_MODELS['apc_ap8958']().get_max_channel(), 20)
+        self.assertEqual(APC_MODELS['apc_ap8959']().get_max_channel(), 24)  # (21) C13 + (3) C19
+        self.assertEqual(APC_MODELS['apc_ap8958']().get_max_channel(), 8)  # (7) C13 + (1) C19
 
 
 class TestApcCliParsing(unittest.TestCase):
@@ -135,7 +135,7 @@ class TestApcDriver(unittest.TestCase):
             "olStatus all": fixture("olstatus_all.txt"),
             "olOn 1": fixture("olon_success.txt"),
         })
-        self.assertEqual(driver.get_channel_count(), 8)  # device reports 8, not the model default 28
+        self.assertEqual(driver.get_channel_count(), 8)  # device reports 8, not the model default 24
         driver.turn_on(1)
         self.assertEqual(transport.sent.count("olStatus all"), 1)
         with self.assertRaises(ValueError):
@@ -161,9 +161,9 @@ class TestApcDriver(unittest.TestCase):
 
         driver_8959 = ApcAp8959Driver()
         driver_8959.connected = True
-        driver_8959._device_channel_count = 28
+        driver_8959._device_channel_count = 24
         with self.assertRaises(ValueError):
-            driver_8959.turn_on(29)
+            driver_8959.turn_on(25)
 
 
 class TestApcOverSsh(unittest.TestCase):

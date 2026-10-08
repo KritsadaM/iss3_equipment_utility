@@ -2,6 +2,12 @@
 # Each vendor section maps a registry signature to its model attributes.
 # The base driver class for each vendor handles all protocol logic;
 # these entries only supply the per-model identity and matching info.
+#
+# `model` must contain the vendor part number (the first word with a digit):
+# discovery matches it against the model the device reports. `channels` is a
+# fallback: drivers read the real outlet count from the device once connected.
+# Only switchable PDUs belong here -- e.g. WTI's TSM console servers and PTS
+# transfer switches have no per-outlet control and were removed.
 
 apc:
   apc_ap7900:  {model: "APC AP7900 Switched Rack PDU",  channels: 8,  suffix: ".50"}
@@ -18,12 +24,12 @@ apc:
   apc_ap8932:  {model: "APC AP8932 Switched Rack PDU 2G",  channels: 24, suffix: ".592"}
   apc_ap8941:  {model: "APC AP8941 Switched Rack PDU 2G",  channels: 24, suffix: ".53"}
   apc_ap8953:  {model: "APC AP8953 Switched Rack PDU 2G",  channels: 24, suffix: ".553"}
-  apc_ap8958:  {model: "APC AP8958 Switched Rack PDU 2G",  channels: 20, suffix: ".558"}
-  apc_ap8959:  {model: "APC AP8959 Switched Rack PDU 2G",  channels: 28, suffix: ".54"}
+  apc_ap8958:  {model: "APC AP8958 Switched Rack PDU 2G",  channels: 8,  suffix: ".558"}
+  apc_ap8959:  {model: "APC AP8959 Switched Rack PDU 2G",  channels: 24, suffix: ".54"}
   apc_ap8959eu3: {model: "APC AP8959EU3 3-Phase Switched Rack PDU 2G", channels: 24, suffix: ".559"}
   apc_ap8965:  {model: "APC AP8965 3-Phase Switched Rack PDU 2G", channels: 24, suffix: ".565"}
   apc_ap8641:  {model: "APC AP8641 Switched Rack PDU with Outlet Metering", channels: 24, suffix: ".564"}
-  apc_ap8659:  {model: "APC AP8659 Switched Rack PDU with Outlet Metering", channels: 28, suffix: ".569"}
+  apc_ap8659:  {model: "APC AP8659 Switched Rack PDU with Outlet Metering", channels: 24, suffix: ".569"}
 
 wti:
   wti_vmr_hd4d20: {model: "WTI VMR-HD4D20 C19",          channels: 20, suffix: ".40"}
@@ -38,9 +44,7 @@ wti:
   wti_ips_1600:   {model: "WTI IPS-1600 Internet Power Switch",   channels: 16, suffix: ".417"}
   wti_cpm_800:    {model: "WTI CPM-800 Control Port Manager",     channels: 8,  suffix: ".44"}
   wti_cpm_1600:   {model: "WTI CPM-1600 Control Port Manager",    channels: 16, suffix: ".418"}
-  wti_pts_4hd20:  {model: "WTI PTS-4HD20 Power Transfer Switch",  channels: 4,  suffix: ".440"}
-  wti_tsm_8:      {model: "WTI TSM-8 Terminal Server Manager",    channels: 8,  suffix: ".448"}
-  wti_rsm_8:      {model: "WTI RSM-8 Remote Site Manager",        channels: 8,  suffix: ".449"}
+  wti_rsm_8:      {model: "WTI RSM-8R8 Console + Power Hybrid",  channels: 8,  suffix: ".449"}
   wti_nbb_16:     {model: "WTI NBB-16 Network Boot Bar",          channels: 16, suffix: ".460"}
 
 raritan:
