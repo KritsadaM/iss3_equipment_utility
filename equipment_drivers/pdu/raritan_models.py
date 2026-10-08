@@ -6,6 +6,7 @@ from requests.auth import HTTPBasicAuth, HTTPDigestAuth
 from equipment_drivers.interfaces import PDUDriver
 from equipment_drivers.responses import PDUResponse
 from equipment_drivers.exceptions import EquipmentConnectionError, EquipmentCommandError, EquipmentNotConnectedError
+from equipment_drivers.pdu.wti_models import _scheme, _tls_hint
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,10 @@ class BaseRaritanPduDriver(PDUDriver):
     DEFAULT_CHANNEL_COUNT = 8
     DEFAULT_PORT = 80
     IP_SUFFIX = ""
+    # None: HTTPS only on port 443. True/False forces it on any port.
+    use_https: Optional[bool] = None
+    # False skips TLS certificate checks (PDUs usually ship self-signed certificates).
+    verify_tls: bool = True
 
     def __init__(self):
         self.ip = ""
@@ -68,9 +73,10 @@ class BaseRaritanPduDriver(PDUDriver):
 
     def _set_endpoint(self, ip: str, port: Optional[int], username: Optional[str], password: Optional[str]):
         self.ip = ip
-        self.port = port or self.DEFAULT_PORT
-        self.scheme = "https" if self.port == 443 else self.scheme
+        self.port = port or (443 if self.use_https else self.DEFAULT_PORT)
+        self.scheme = _scheme(self.port, self.use_https)
         self.base_url = f"{self.scheme}://{self.ip}:{self.port}"
+        self.session.verify = self.verify_tls
         if username is not None:
             self.username = username
         if password is not None:
@@ -89,7 +95,8 @@ class BaseRaritanPduDriver(PDUDriver):
 
     @classmethod
     def identify(cls, ip: str, port: Optional[int] = None, username: Optional[str] = None,
-                 password: Optional[str] = None, timeout: float = 3.0) -> Optional[str]:
+                 password: Optional[str] = None, timeout: float = 3.0,
+                 use_https: Optional[bool] = None, verify_tls: bool = True) -> Optional[str]:
         """
         Ask the device what it is. Returns nameplate.model from getMetaData
         (e.g. "PX3-5460"), "" if it is a Xerus PDU that didn't report one, or
@@ -97,6 +104,8 @@ class BaseRaritanPduDriver(PDUDriver):
         """
         probe = cls()
         probe.timeout = timeout
+        probe.use_https = use_https
+        probe.verify_tls = verify_tls
         probe._set_endpoint(ip, port, username, password)
         try:
             metadata, _ = probe._get_metadata()
@@ -124,7 +133,7 @@ class BaseRaritanPduDriver(PDUDriver):
             return True
         except (requests.exceptions.RequestException, EquipmentCommandError) as e:
             logger.error(f"Failed to connect to {self.get_model()} at {disp_ip}:{disp_port}: {e}")
-            raise EquipmentConnectionError(f"Connection to Raritan PDU failed: {e}")
+            raise EquipmentConnectionError(f"Connection to Raritan PDU failed: {e}{_tls_hint(e)}")
 
     def disconnect(self) -> bool:
         self.session.close()

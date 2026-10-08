@@ -1,6 +1,10 @@
 import json
 import logging
+import os
 import socket
+import ssl
+import subprocess
+import tempfile
 import threading
 import time
 from datetime import datetime, timezone
@@ -365,6 +369,24 @@ class ApcCliEngine:
 
 
 _HOST_KEY = None
+_TLS_CERT = None
+
+
+def _self_signed_cert():
+    """(certfile, keyfile) for a throwaway self-signed localhost certificate, like
+    the ones PDUs ship with. Generated once per process with the openssl CLI."""
+    global _TLS_CERT
+    if _TLS_CERT is None:
+        directory = tempfile.mkdtemp(prefix="iss-mock-tls-")
+        cert, key = os.path.join(directory, "cert.pem"), os.path.join(directory, "key.pem")
+        try:
+            subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2",
+                            "-subj", "/CN=localhost", "-keyout", key, "-out", cert],
+                           check=True, capture_output=True)
+        except (OSError, subprocess.CalledProcessError) as e:
+            raise RuntimeError(f"The TLS mock needs the openssl command to make a certificate: {e}")
+        _TLS_CERT = (cert, key)
+    return _TLS_CERT
 _SSH_SERVER_LOG = "equipment_drivers.simulator.ssh_server"
 logging.getLogger(_SSH_SERVER_LOG).setLevel(logging.CRITICAL)
 
@@ -530,7 +552,8 @@ class MockPduServer:
     """
     def __init__(self, vendor: str = "apc", channel_count: int = 8, port: int = 0,
                  model_name: str = "", model_signature: str = "", voltage: float = 120.0,
-                 username: Optional[str] = None, password: Optional[str] = None, fault: Optional[str] = None):
+                 username: Optional[str] = None, password: Optional[str] = None, fault: Optional[str] = None,
+                 tls: bool = False):
         if fault is not None and fault not in FAULTS:
             raise ValueError(f"Unknown fault '{fault}'. Choose from: {', '.join(FAULTS)}")
         self.vendor = vendor.lower()
@@ -543,6 +566,8 @@ class MockPduServer:
         self.username = username
         self.password = password
         self.fault = fault
+        # HTTPS with a self-signed certificate (WTI/Raritan only; APC is SSH).
+        self.tls = tls
         self._stop_event = threading.Event()
         self.server = None
         self.thread: Optional[threading.Thread] = None
@@ -581,6 +606,10 @@ class MockPduServer:
             self.server = ThreadingHTTPServer((self.host, self.requested_port), CustomHandler)
             self.server.daemon_threads = True
             self.server.block_on_close = False
+            if self.tls:
+                context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                context.load_cert_chain(*_self_signed_cert())
+                self.server.socket = context.wrap_socket(self.server.socket, server_side=True)
 
         self.port = self.server.server_port
         self._stop_event.clear()

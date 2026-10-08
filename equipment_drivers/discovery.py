@@ -14,7 +14,8 @@ IDENTIFY_TIMEOUT = 3.0
 
 def discover_and_instantiate(ip: str, port: Optional[int], equipment_type: str,
                              username: Optional[str] = None, password: Optional[str] = None,
-                             identify: bool = True) -> Optional[EquipmentDriver]:
+                             identify: bool = True, use_https: Optional[bool] = None,
+                             verify_tls: bool = True) -> Optional[EquipmentDriver]:
     """
     Picks the driver for the device at ip:port, in order of confidence:
 
@@ -27,7 +28,8 @@ def discover_and_instantiate(ip: str, port: Optional[int], equipment_type: str,
        IP-suffix convention).
     3. The "dummy_{equipment_type}_sig" driver as a last resort.
 
-    Pass identify=False to skip step 1 (no network traffic).
+    Pass identify=False to skip step 1 (no network traffic). use_https and
+    verify_tls are passed to the HTTP-based vendors' identify().
     """
     candidates = registry.get_all_drivers(equipment_type)
     if not candidates:
@@ -35,7 +37,8 @@ def discover_and_instantiate(ip: str, port: Optional[int], equipment_type: str,
         return None
 
     if identify:
-        driver = _identify_device(ip, port, candidates, username, password)
+        driver = _identify_device(ip, port, candidates, username, password,
+                                  {"use_https": use_https, "verify_tls": verify_tls})
         if driver is not None:
             return driver
 
@@ -82,7 +85,7 @@ def _identifiers(candidates) -> List[type]:
     return found
 
 
-def _identify_device(ip, port, candidates, username, password) -> Optional[EquipmentDriver]:
+def _identify_device(ip, port, candidates, username, password, http_options) -> Optional[EquipmentDriver]:
     identifiers = _identifiers(candidates)
     if not identifiers:
         return None
@@ -91,7 +94,7 @@ def _identify_device(ip, port, candidates, username, password) -> Optional[Equip
 
     def ask(base):
         try:
-            return base.identify(ip, port, username, password, timeout=IDENTIFY_TIMEOUT)
+            return base.identify(ip, port, username, password, timeout=IDENTIFY_TIMEOUT, **http_options)
         except Exception as e:
             logger.debug(f"{base.__name__}.identify raised: {e}")
             return None

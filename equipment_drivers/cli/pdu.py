@@ -33,16 +33,21 @@ VERIFY_ATTEMPTS = 3
 VERIFY_INTERVAL = 1.0
 
 
-def resolve_pdu_driver(model_arg, ip_arg, port_arg, is_buyoff, username=None, password=None):
+def resolve_pdu_driver(model_arg, ip_arg, port_arg, is_buyoff, username=None, password=None, http_options=None):
     """
     Resolves (signature, driver_class, display_ip, display_port).
     Handles explicit model signature, auto-discovery, and Buy-off defaults.
     Against a real PDU, discovery asks the device for its model first and only
     falls back to the IP-address convention if it doesn't answer.
     """
+    https = bool((http_options or {}).get("use_https"))
+
     def port_for(cls):
-        # No --port given: use the vendor's own default (APC 22/SSH, WTI and Raritan 80/HTTP).
-        return port_arg if port_arg is not None else getattr(cls, "DEFAULT_PORT", 80)
+        # No --port given: use the vendor's own default (APC 22/SSH, WTI and Raritan 80/HTTP, 443 with --https).
+        if port_arg is not None:
+            return port_arg
+        default = getattr(cls, "DEFAULT_PORT", 80)
+        return 443 if https and default == 80 else default
 
     port = port_arg
     all_drivers = dict(registry.get_all_drivers("pdu"))
@@ -64,7 +69,8 @@ def resolve_pdu_driver(model_arg, ip_arg, port_arg, is_buyoff, username=None, pa
         return sig, driver_cls, display_ip, port_for(driver_cls)
 
     if ip_arg and not is_buyoff:
-        driver_instance = discover_and_instantiate(ip_arg, port, "pdu", username=username, password=password)
+        driver_instance = discover_and_instantiate(ip_arg, port, "pdu", username=username, password=password,
+                                                   **(http_options or {}))
         if not driver_instance:
             logger.error("Failed to detect PDU model or find suitable driver.")
             sys.exit(1)
@@ -129,6 +135,10 @@ def main(argv=None, engineering: bool = False):
     parser.add_argument("--password", default=None,
                         help="Password override for the PDU (falls back to PDU_PASSWORD env var, then driver default). "
                              "Prefer the env var over this flag to avoid the password showing up in shell history.")
+    parser.add_argument("--https", action="store_true",
+                        help="Use HTTPS for WTI/Raritan on any port (default: HTTPS only on port 443)")
+    parser.add_argument("--insecure", action="store_true",
+                        help="Don't verify the PDU's TLS certificate (most PDUs ship a self-signed one)")
     parser.add_argument("--verify", action="store_true",
                         help="After on/off, read each outlet back and fail unless it reports the new state "
                              f"(up to {VERIFY_ATTEMPTS} reads, {VERIFY_INTERVAL:g}s apart). Catches PDUs that "
@@ -173,8 +183,15 @@ def main(argv=None, engineering: bool = False):
 
 
 def _run(args, username, password):
+    http_options = {"use_https": True if args.https else None, "verify_tls": not args.insecure}
+    if args.insecure:
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        logger.warning("TLS certificate verification is disabled (--insecure).")
+
     sig, driver_cls, display_ip, display_port = resolve_pdu_driver(
-        args.model, args.ip_address, args.port, args.buyoff, username=username, password=password
+        args.model, args.ip_address, args.port, args.buyoff, username=username, password=password,
+        http_options=http_options,
     )
 
     mock_server = None
@@ -187,7 +204,8 @@ def _run(args, username, password):
         voltage = determine_voltage(sig, model_name)
 
         mock_server = MockPduServer(vendor=vendor, channel_count=max_ch, model_name=model_name,
-                                    model_signature=sig, voltage=voltage, fault=args.fault)
+                                    model_signature=sig, voltage=voltage, fault=args.fault,
+                                    tls=args.https and vendor != "apc")
         mock_server.start()
         if args.fault:
             print(f"[BUY-OFF] Simulating fault '{args.fault}': {FAULTS[args.fault]}")
@@ -196,12 +214,16 @@ def _run(args, username, password):
         driver = driver_cls()
         driver.display_ip = display_ip
         driver.display_port = display_port
+        driver.use_https = http_options["use_https"]
+        driver.verify_tls = http_options["verify_tls"]
     else:
         target_ip = display_ip
         target_port = display_port
         driver = driver_cls()
         driver.display_ip = display_ip
         driver.display_port = display_port
+        driver.use_https = http_options["use_https"]
+        driver.verify_tls = http_options["verify_tls"]
 
     try:
         connected = driver.connect(target_ip, target_port, username=username, password=password)

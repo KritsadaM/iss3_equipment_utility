@@ -72,7 +72,7 @@ class BaseApcPduDriver(PDUDriver):
 
     @classmethod
     def identify(cls, ip: str, port: Optional[int] = None, username: Optional[str] = None,
-                 password: Optional[str] = None, timeout: float = 3.0) -> Optional[str]:
+                 password: Optional[str] = None, timeout: float = 3.0, **_http_options) -> Optional[str]:
         """
         Log in and ask the device what it is. Returns the model the PDU reports
         via `prodInfo` (e.g. "AP7920B"), "" if it is an APC NMC that didn't

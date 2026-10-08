@@ -96,6 +96,22 @@ PDU_USERNAME=admin PDU_PASSWORD=secret iss_pdu_utility --ip_address 192.168.1.40
 
 Precedence: `--username`/`--password` flag → `PDU_USERNAME`/`PDU_PASSWORD` env var (`TS_*` / `DAQ_*` for the other two utilities) → the driver's own built-in default, if it has one.
 
+Built-in defaults are the vendors' factory credentials:
+
+| Vendor | Default username / password |
+|---|---|
+| APC | `apc` / `apc` |
+| WTI | `super` / `super` ([WTI KB](https://wti.com/blogs/knowledge-base/changing-the-default-password)) |
+| Raritan | `admin` / `raritan` |
+
+### HTTPS
+
+WTI and Raritan use HTTPS automatically on port 443. Use `--https` to force HTTPS on any other port; without `--port` it then defaults to 443. Most PDUs ship with a self-signed certificate, which fails verification. Add `--insecure` to skip the check:
+
+```bash
+iss_pdu_utility --ip_address 192.168.1.40 --https --insecure status all
+```
+
 ## How it works
 
 ```
