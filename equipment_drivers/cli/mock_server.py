@@ -89,6 +89,9 @@ def main(argv=None):
         "--channels", type=int, default=None,
         help="Number of simulated outlets/channels (default: vendor-specific default)")
     parser.add_argument(
+        "--snmp", action="store_true",
+        help="Serve the vendor's SNMP MIB outlet objects over UDP (APC/Raritan; communities public/private)")
+    parser.add_argument(
         "--apc-generation", choices=APC_GENERATIONS, default="rpdu2g",
         help="APC firmware CLI dialect: rpdu2g (2nd gen: olOn/olStatus, default) or rpdu (1st gen: on/status)")
     parser.add_argument(
@@ -100,9 +103,9 @@ def main(argv=None):
     default_channels = {"apc": 8, "wti": 20, "raritan": 24}
     channels = args.channels or default_channels.get(args.vendor, 8)
 
-    port = args.port if args.port is not None else (2222 if args.vendor == "apc" else 8080)
+    port = args.port if args.port is not None else (1161 if args.snmp else 2222 if args.vendor == "apc" else 8080)
     server = MockPduServer(vendor=args.vendor, channel_count=channels, port=port, fault=args.fault,
-                           apc_generation=args.apc_generation)
+                           apc_generation=args.apc_generation, snmp=args.snmp)
 
     def shutdown(sig, frame):
         print(f"\n{BOLD}Shutting down mock server...{RESET}")
@@ -113,7 +116,13 @@ def main(argv=None):
     signal.signal(signal.SIGTERM, shutdown)
 
     server.start()
-    print_banner(args.vendor, server.host, server.port, channels)
+    if args.snmp:
+        print(f"{BOLD}SNMP {args.vendor.upper()} PDU agent on udp://{server.host}:{server.port} "
+              f"(read community 'public', write 'private'){RESET}")
+        print(f"  snmpget -v{'1' if args.vendor == 'apc' else '2c'} -c public {server.host}:{server.port} "
+              f".{server.server.profile.model_oid}\n")
+    else:
+        print_banner(args.vendor, server.host, server.port, channels)
     if args.fault:
         print(f"  {YELLOW}Simulating fault '{args.fault}': {FAULTS[args.fault]}{RESET}\n")
 

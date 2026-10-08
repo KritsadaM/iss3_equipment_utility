@@ -157,6 +157,28 @@ response = driver.turn_on(3)
 # response.success, response.action, response.channel, response.raw, response.status, response.model
 ```
 
+### SNMP
+
+`--snmp` controls APC and Raritan outlets over SNMP instead of SSH/HTTP (UDP port 161):
+
+| Vendor | MIB objects | Version |
+|---|---|---|
+| APC 2nd gen | PowerNet-MIB `rPDU2OutletSwitchedControlCommand` (1 = on, 2 = off) | v1. The APC NMC offers v1 and v3, not v2c. |
+| APC 1st gen | PowerNet-MIB `rPDUOutletControlOutletCommand` (detected automatically) | v1 |
+| Raritan | PDU2-MIB: write `switchingOperation` (0 = off, 1 = on), read `outletSwitchingState` (7 = on, 8 = off) | v2c |
+
+```bash
+PDU_SNMP_COMMUNITY=private iss_pdu_utility --ip_address 192.168.1.61 --snmp --verify off 3
+```
+
+The model is read over SNMP (`rPDU2IdentModelNumber` / `rPDUIdentModelNumber` / `pduModel`). The write community comes from `--community`, then `PDU_SNMP_COMMUNITY`, then defaults to `private`. `PDU_PASSWORD` is never sent over SNMP. `--snmp-version 1|2c` overrides the version.
+
+Not supported:
+- WTI over SNMP: its MIB doesn't document the `plugAction` values, so use its REST API.
+- SNMPv3.
+
+`RAW_OUTPUT` is the varbind in net-snmp form, e.g. `.1.3.6.1.4.1.13742.6.4.1.2.1.3.1.3 = INTEGER: 8`.
+
 ### Machine-readable output
 
 `--json` prints one JSON document instead of the text lines:
