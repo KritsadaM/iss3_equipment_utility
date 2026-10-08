@@ -51,6 +51,23 @@ iss_pdu_utility --ip_address 192.168.1.40 --port 80 on 1-4
 iss_pdu_utility --ip_address 192.168.1.40 --port 80 status all
 ```
 
+#### Buy-off Mode (Simulation / Offline)
+
+Use `--buyoff` (or `--mock`) to run against the internal PDU simulator with authentic device responses without physical hardware:
+
+```bash
+# Default Buy-off (simulates APC AP7900)
+iss_pdu_utility --buyoff status 1
+
+# Buy-off with specific PDU model signature
+iss_pdu_utility --buyoff --model wti_vmr_hd4d20 status 1-3
+
+# Buy-off with IP auto-detection (e.g. 192.168.1.40 detects WTI)
+iss_pdu_utility --buyoff --ip_address 192.168.1.40 on 2
+```
+
+Both Buy-off and Real PDU modes print `RAW_CONNECTION:` (what the PDU sent on connect) and `RAW_OUTPUT:` (its reply to each action), in the vendor's own format: CLI text for APC (login banner, `E000: Success` ...), JSON for WTI and Raritan.
+
 ### Terminal Server
 
 ```bash

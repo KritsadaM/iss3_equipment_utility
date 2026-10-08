@@ -79,25 +79,31 @@ class BaseRaritanPduDriver(PDUDriver):
             self.password = password
         self.auth = HTTPDigestAuth(self.username, self.password)
 
+        disp_ip = getattr(self, "display_ip", None) or self.ip
+        disp_port = getattr(self, "display_port", None) or self.port
+
         try:
             try:
-                self._rpc("/model/pdu/0", "getMetaData")
+                _, raw = self._rpc("/model/pdu/0", "getMetaData")
             except requests.exceptions.HTTPError as e:
                 if e.response is None or e.response.status_code != 401:
                     raise
                 self.auth = HTTPBasicAuth(self.username, self.password)
-                self._rpc("/model/pdu/0", "getMetaData")
+                _, raw = self._rpc("/model/pdu/0", "getMetaData")
             self.connected = True
-            logger.info(f"Connected to {self.get_model()} at {self.ip}:{self.port}")
+            self.raw_connection = raw
+            logger.info(f"Connected to {self.get_model()} at {disp_ip}:{disp_port}")
             return True
         except (requests.exceptions.RequestException, EquipmentCommandError) as e:
-            logger.error(f"Failed to connect to {self.get_model()} at {self.ip}:{self.port}: {e}")
+            logger.error(f"Failed to connect to {self.get_model()} at {disp_ip}:{disp_port}: {e}")
             raise EquipmentConnectionError(f"Connection to Raritan PDU failed: {e}")
 
     def disconnect(self) -> bool:
         self.session.close()
         self.connected = False
-        logger.info(f"Disconnected from {self.get_model()} at {self.ip}:{self.port}")
+        disp_ip = getattr(self, "display_ip", None) or self.ip
+        disp_port = getattr(self, "display_port", None) or self.port
+        logger.info(f"Disconnected from {self.get_model()} at {disp_ip}:{disp_port}")
         return True
 
     def get_model(self) -> str:

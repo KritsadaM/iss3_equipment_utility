@@ -4,7 +4,7 @@ from typing import Dict, Optional, Tuple
 from equipment_drivers.interfaces import PDUDriver
 from equipment_drivers.responses import PDUResponse
 from equipment_drivers.cli_transport import SshCliTransport
-from equipment_drivers.exceptions import EquipmentCommandError, EquipmentNotConnectedError
+from equipment_drivers.exceptions import EquipmentCommandError, EquipmentConnectionError, EquipmentNotConnectedError
 
 logger = logging.getLogger(__name__)
 
@@ -71,12 +71,20 @@ class BaseApcPduDriver(PDUDriver):
         if password is not None:
             self.password = password
 
+        disp_ip = getattr(self, "display_ip", None) or self.ip
+        disp_port = getattr(self, "display_port", None) or self.port
+
         transport = self.transport_factory()
-        # open() raises EquipmentConnectionError on failure.
-        transport.open(self.ip, self.port, self.username, self.password, timeout=self.timeout)
+        try:
+            transport.open(self.ip, self.port, self.username, self.password, timeout=self.timeout)
+        except EquipmentConnectionError as e:
+            logger.error(f"Failed to connect to {self.get_model()} at {disp_ip}:{disp_port}: {e}")
+            raise
         self.transport = transport
         self.connected = True
-        logger.info(f"Connected to {self.get_model()} at {self.ip}:{self.port} (SSH CLI)")
+        # The NMC's login banner (firmware versions, name, uptime) is what the device sends on connect.
+        self.raw_connection = getattr(transport, "banner", "")
+        logger.info(f"Connected to {self.get_model()} at {disp_ip}:{disp_port} (SSH CLI)")
         return True
 
     def disconnect(self) -> bool:
@@ -85,7 +93,9 @@ class BaseApcPduDriver(PDUDriver):
             self.transport = None
         self.connected = False
         self._device_channel_count = None
-        logger.info(f"Disconnected from {self.get_model()} at {self.ip}:{self.port}")
+        disp_ip = getattr(self, "display_ip", None) or self.ip
+        disp_port = getattr(self, "display_port", None) or self.port
+        logger.info(f"Disconnected from {self.get_model()} at {disp_ip}:{disp_port}")
         return True
 
     def get_model(self) -> str:

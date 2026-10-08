@@ -62,20 +62,26 @@ class BaseWtiPduDriver(PDUDriver):
             self.password = password
         self.auth = HTTPBasicAuth(self.username, self.password)
 
+        disp_ip = getattr(self, "display_ip", None) or self.ip
+        disp_port = getattr(self, "display_port", None) or self.port
+
         try:
             response = self.session.get(f"{self.base_url}/status/status", auth=self.auth, timeout=self.timeout)
             response.raise_for_status()
             self.connected = True
-            logger.info(f"Connected to {self.get_model()} at {self.ip}:{self.port}")
+            self.raw_connection = str(response.text) if hasattr(response, "text") else ""
+            logger.info(f"Connected to {self.get_model()} at {disp_ip}:{disp_port}")
             return True
         except requests.exceptions.RequestException as e:
-            logger.error(f"Failed to connect to {self.get_model()} at {self.ip}:{self.port}: {e}")
+            logger.error(f"Failed to connect to {self.get_model()} at {disp_ip}:{disp_port}: {e}")
             raise EquipmentConnectionError(f"Connection to WTI PDU failed: {e}")
 
     def disconnect(self) -> bool:
         self.session.close()
         self.connected = False
-        logger.info(f"Disconnected from {self.get_model()} at {self.ip}:{self.port}")
+        disp_ip = getattr(self, "display_ip", None) or self.ip
+        disp_port = getattr(self, "display_port", None) or self.port
+        logger.info(f"Disconnected from {self.get_model()} at {disp_ip}:{disp_port}")
         return True
 
     def get_model(self) -> str:

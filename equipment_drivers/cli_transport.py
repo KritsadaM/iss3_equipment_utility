@@ -18,6 +18,8 @@ import time
 from equipment_drivers.exceptions import EquipmentConnectionError
 
 logger = logging.getLogger(__name__)
+# paramiko logs every handshake step at INFO; keep only its warnings and errors.
+logging.getLogger("paramiko").setLevel(logging.WARNING)
 
 # APC NMC prompts look like "apc>" (or "<user>@apc>" on some firmware).
 DEFAULT_PROMPT_PATTERN = r"[\w.@-]*>\s*$"
@@ -42,14 +44,17 @@ class SshCliTransport:
         self._client.load_system_host_keys()
         # Lab equipment is commonly reached by IP with no known_hosts entry;
         # accept unknown keys but log them rather than failing outright.
-        self._client.set_missing_host_key_policy(paramiko.WarningPolicy())
+        self._client.set_missing_host_key_policy(_log_unknown_host_key_policy(paramiko))
         try:
             self._client.connect(host, port=port, username=username, password=password, timeout=timeout,
                                  look_for_keys=False, allow_agent=False)
             self._chan = self._client.invoke_shell(width=200, height=1000)
             self._chan.settimeout(timeout)
             # Everything up to the first prompt is the login banner.
-            self.banner = self._read_until_prompt()
+            lines = self._read_until_prompt().split("\n")
+            if lines and self._prompt_re.search(lines[-1]):
+                lines = lines[:-1]
+            self.banner = "\n".join(lines).strip("\n")
         except Exception as e:
             self.close()
             raise EquipmentConnectionError(f"SSH session to {host}:{port} failed: {e}")
@@ -97,3 +102,10 @@ class SshCliTransport:
                 return normalized
         raise EquipmentConnectionError(f"Timed out waiting for CLI prompt; received: {buf[-200:]!r}")
 
+
+
+def _log_unknown_host_key_policy(paramiko):
+    class Policy(paramiko.MissingHostKeyPolicy):
+        def missing_host_key(self, client, hostname, key):
+            logger.warning(f"Unknown SSH host key for {hostname} ({key.get_name()} {key.get_fingerprint().hex()})")
+    return Policy()
