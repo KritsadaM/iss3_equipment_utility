@@ -13,21 +13,25 @@ import equipment_drivers
 from equipment_drivers.discovery import discover_and_instantiate
 from equipment_drivers.registry import registry
 from equipment_drivers.channel_spec import parse_channels
+from equipment_drivers.exceptions import EquipmentConnectionError
 
 try:
-    from equipment_drivers.simulator import MockPduServer, determine_vendor, determine_voltage
+    from equipment_drivers.simulator import MockPduServer, determine_vendor, determine_voltage, FAULTS
     HAS_MOCK = True
 except ImportError:
     HAS_MOCK = False
+    FAULTS = {}
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger("pdu_utility")
 
 
-def resolve_pdu_driver(model_arg, ip_arg, port_arg, is_buyoff):
+def resolve_pdu_driver(model_arg, ip_arg, port_arg, is_buyoff, username=None, password=None):
     """
     Resolves (signature, driver_class, display_ip, display_port).
-    Handles explicit model signature, IP probe auto-discovery, and Buy-off defaults.
+    Handles explicit model signature, auto-discovery, and Buy-off defaults.
+    Against a real PDU, discovery asks the device for its model first and only
+    falls back to the IP-address convention if it doesn't answer.
     """
     def port_for(cls):
         # No --port given: use the vendor's own default (APC 22/SSH, WTI and Raritan 80/HTTP).
@@ -52,7 +56,18 @@ def resolve_pdu_driver(model_arg, ip_arg, port_arg, is_buyoff):
         display_ip = ip_arg or "192.168.1.50"
         return sig, driver_cls, display_ip, port_for(driver_cls)
 
+    if ip_arg and not is_buyoff:
+        driver_instance = discover_and_instantiate(ip_arg, port, "pdu", username=username, password=password)
+        if not driver_instance:
+            logger.error("Failed to detect PDU model or find suitable driver.")
+            sys.exit(1)
+        driver_cls = type(driver_instance)
+        # Generic drivers for unlisted models aren't registered under a signature.
+        sig = next((s for s, c in all_drivers.items() if c is driver_cls), None)
+        return sig, driver_cls, ip_arg, port_for(driver_cls)
+
     if ip_arg:
+        # Buy-off: there is no device to ask, so pick the model from the IP-address convention.
         for signature, cls in all_drivers.items():
             if signature.startswith("dummy"):
                 continue
@@ -62,22 +77,9 @@ def resolve_pdu_driver(model_arg, ip_arg, port_arg, is_buyoff):
             except Exception:
                 pass
 
-        if is_buyoff:
-            sig = "apc_ap7900"
-            driver_cls = registry.get_driver("pdu", sig)
-            return sig, driver_cls, ip_arg, port_for(driver_cls)
-        else:
-            driver_instance = discover_and_instantiate(ip_arg, port, "pdu")
-            if not driver_instance:
-                logger.error("Failed to detect PDU model or find suitable driver.")
-                sys.exit(1)
-            driver_cls = type(driver_instance)
-            sig = "dummy_pdu_sig"
-            for s, c in all_drivers.items():
-                if c == driver_cls:
-                    sig = s
-                    break
-            return sig, driver_cls, ip_arg, port_for(driver_cls)
+        sig = "apc_ap7900"
+        driver_cls = registry.get_driver("pdu", sig)
+        return sig, driver_cls, ip_arg, port_for(driver_cls)
 
     sig = "apc_ap7900"
     driver_cls = registry.get_driver("pdu", sig)
@@ -94,6 +96,9 @@ def main():
                         help="Run in Buy-off mode against internal PDU simulator (simulates authentic hardware responses)")
     parser.add_argument("--model", type=str, default=None,
                         help="Explicit driver model signature (e.g. apc_ap7900, wti_vmr_hd4d20, raritan_px3_5460)")
+    parser.add_argument("--fault", choices=sorted(FAULTS) or None, default=None,
+                        help="Buy-off only: make the simulated PDU misbehave ("
+                             + "; ".join(f"{k}: {v}" for k, v in FAULTS.items()) + ")")
     parser.add_argument("--username", default=None,
                         help="Username override for the PDU (falls back to PDU_USERNAME env var, then driver default)")
     parser.add_argument("--password", default=None,
@@ -116,11 +121,14 @@ def main():
     elif not args.ip_address:
         parser.error("the following arguments are required: --ip_address (unless in Buy-off mode)")
 
+    if args.fault and not args.buyoff:
+        parser.error("--fault only applies in Buy-off mode (--buyoff / --mock)")
+
     username = args.username or os.environ.get("PDU_USERNAME")
     password = args.password or os.environ.get("PDU_PASSWORD")
 
     sig, driver_cls, display_ip, display_port = resolve_pdu_driver(
-        args.model, args.ip_address, args.port, args.buyoff
+        args.model, args.ip_address, args.port, args.buyoff, username=username, password=password
     )
 
     mock_server = None
@@ -133,8 +141,10 @@ def main():
         voltage = determine_voltage(sig, model_name)
 
         mock_server = MockPduServer(vendor=vendor, channel_count=max_ch, model_name=model_name,
-                                    model_signature=sig, voltage=voltage)
+                                    model_signature=sig, voltage=voltage, fault=args.fault)
         mock_server.start()
+        if args.fault:
+            print(f"[BUY-OFF] Simulating fault '{args.fault}': {FAULTS[args.fault]}")
         target_ip = mock_server.host
         target_port = mock_server.port
         driver = driver_cls()
@@ -162,6 +172,8 @@ def main():
 
         try:
             channel_count = driver.get_max_channel()
+        except EquipmentConnectionError:
+            raise  # device stopped answering; reported below
         except Exception as e:
             logger.warning(f"Could not determine driver channel count: {e}")
             channel_count = None

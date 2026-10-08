@@ -14,7 +14,7 @@ import sys
 import time
 
 import equipment_drivers  # noqa: trigger auto-import of all drivers
-from equipment_drivers.simulator import MockPduServer
+from equipment_drivers.simulator import MockPduServer, FAULTS
 
 BOLD = "\033[1m"
 CYAN = "\033[96m"
@@ -88,6 +88,9 @@ def main():
     parser.add_argument(
         "--channels", type=int, default=None,
         help="Number of simulated outlets/channels (default: vendor-specific default)")
+    parser.add_argument(
+        "--fault", choices=sorted(FAULTS), default=None,
+        help="Make the PDU misbehave: " + "; ".join(f"{k} = {v}" for k, v in FAULTS.items()))
     args = parser.parse_args()
 
     # Default channel counts per vendor
@@ -95,7 +98,7 @@ def main():
     channels = args.channels or default_channels.get(args.vendor, 8)
 
     port = args.port if args.port is not None else (2222 if args.vendor == "apc" else 8080)
-    server = MockPduServer(vendor=args.vendor, channel_count=channels, port=port)
+    server = MockPduServer(vendor=args.vendor, channel_count=channels, port=port, fault=args.fault)
 
     def shutdown(sig, frame):
         print(f"\n{BOLD}Shutting down mock server...{RESET}")
@@ -107,6 +110,8 @@ def main():
 
     server.start()
     print_banner(args.vendor, server.host, server.port, channels)
+    if args.fault:
+        print(f"  {YELLOW}Simulating fault '{args.fault}': {FAULTS[args.fault]}{RESET}\n")
 
     # Keep alive until Ctrl+C
     while True:

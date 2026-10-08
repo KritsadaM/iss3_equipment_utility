@@ -31,7 +31,7 @@ class TestPduUtility(unittest.TestCase):
         # APC is driven over the NMC CLI: RAW_CONNECTION is the SSH login banner,
         # RAW_OUTPUT is the CLI's text reply.
         conn = res.stdout.split("RAW_CONNECTION:\n")[1].split("Channel 1 Status:")[0]
-        self.assertIn("American Power Conversion", conn)
+        self.assertIn("Network Management Card", conn)
         self.assertIn("RAW_OUTPUT:\nE000: Success\n 1: Outlet 1: On", res.stdout)
 
     def test_buyoff_wti_by_ip(self):

@@ -13,12 +13,20 @@ logger = logging.getLogger(__name__)
 _APC_SUCCESS_CODES = ("000", "001")
 _RESULT_CODE_RE = re.compile(r"^\s*E(\d{3}):", re.MULTILINE)
 # olStatus lines look like " 3: Outlet 3: On" -- number, outlet name, state.
+# prodInfo prints "Key: value" lines, one of them "Model:            AP7920B".
+_MODEL_RE = re.compile(r"^\s*Model\s*:\s*(\S+)", re.MULTILINE)
 _OUTLET_LINE_RE = re.compile(r"^\s*(\d+):\s*(.*?):\s*(On|Off)\b", re.MULTILINE | re.IGNORECASE)
 
 
 def parse_result_code(output: str) -> Optional[str]:
     """Return the 3-digit code from the 'Exxx: <message>' line, or None if absent."""
     match = _RESULT_CODE_RE.search(output)
+    return match.group(1) if match else None
+
+
+def parse_model(prod_info: str) -> Optional[str]:
+    """Return the value of the 'Model:' line from `prodInfo` output (e.g. 'AP7920B')."""
+    match = _MODEL_RE.search(prod_info)
     return match.group(1) if match else None
 
 
@@ -61,6 +69,33 @@ class BaseApcPduDriver(PDUDriver):
         if cls.IP_SUFFIX:
             return ip.endswith(cls.IP_SUFFIX)
         return False
+
+    @classmethod
+    def identify(cls, ip: str, port: Optional[int] = None, username: Optional[str] = None,
+                 password: Optional[str] = None, timeout: float = 3.0) -> Optional[str]:
+        """
+        Log in and ask the device what it is. Returns the model the PDU reports
+        via `prodInfo` (e.g. "AP7920B"), "" if it is an APC NMC that didn't
+        report a model, or None if the device doesn't speak the APC NMC CLI.
+        """
+        defaults = cls()
+        transport = cls.transport_factory()
+        try:
+            transport.open(ip, port or cls.DEFAULT_PORT, username or defaults.username,
+                           password or defaults.password, timeout=timeout)
+        except EquipmentConnectionError as e:
+            logger.debug(f"APC identify: no NMC CLI at {ip}:{port or cls.DEFAULT_PORT}: {e}")
+            return None
+        try:
+            if "Network Management Card" not in getattr(transport, "banner", ""):
+                return None
+            try:
+                return parse_model(transport.send("prodInfo")) or ""
+            except Exception as e:
+                logger.debug(f"APC identify: prodInfo failed at {ip}: {e}")
+                return ""
+        finally:
+            transport.close()
 
     def connect(self, ip: str, port: Optional[int] = None, username: Optional[str] = None,
                 password: Optional[str] = None) -> bool:
@@ -109,6 +144,8 @@ class BaseApcPduDriver(PDUDriver):
             try:
                 states = parse_outlet_states(self._run("olStatus all"))
                 self._device_channel_count = max(states) if states else self.DEFAULT_CHANNEL_COUNT
+            except EquipmentConnectionError:
+                raise  # the device stopped answering; don't retry with a guessed count
             except Exception as e:
                 logger.warning(f"Could not query outlet count from {self.get_model()}, falling back to default: {e}")
                 self._device_channel_count = self.DEFAULT_CHANNEL_COUNT
@@ -119,6 +156,10 @@ class BaseApcPduDriver(PDUDriver):
             raise EquipmentNotConnectedError("Not connected to PDU")
         try:
             return self.transport.send(command)
+        except EquipmentConnectionError as e:
+            # Timed out or connection dropped: the session is unusable.
+            logger.error(f"CLI command '{command}' failed on {self.get_model()}: {e}")
+            raise EquipmentConnectionError(f"APC CLI command '{command}' failed: {e}")
         except Exception as e:
             logger.error(f"CLI command '{command}' failed on {self.get_model()}: {e}")
             raise EquipmentCommandError(f"APC CLI command '{command}' failed: {e}")

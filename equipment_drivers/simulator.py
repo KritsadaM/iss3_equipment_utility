@@ -2,8 +2,9 @@ import json
 import logging
 import socket
 import threading
+import time
 from datetime import datetime, timezone
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Dict, Optional, Type
 from urllib.parse import parse_qs, urlparse
 
@@ -17,6 +18,7 @@ from equipment_drivers.interfaces import PDUDriver
 from equipment_drivers.registry import registry
 from equipment_drivers.channel_spec import parse_channels
 from equipment_drivers.responses import PDUResponse
+from equipment_drivers.exceptions import EquipmentError, EquipmentCommandError, EquipmentConnectionError
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +30,27 @@ CYAN = "\033[96m"
 BOLD = "\033[1m"
 DIM = "\033[2m"
 RESET = "\033[0m"
+
+
+# Faults a mock PDU can simulate, so error handling can be exercised without hardware.
+FAULTS = {
+    "auth_fail": "rejects every login (HTTP 401 / SSH auth failure)",
+    "timeout": "accepts the connection, then never answers a command",
+    "drop": "accepts the connection, then drops it on the first command",
+    "command_error": "answers outlet commands with the vendor's error reply",
+    "stuck_outlet": "reports outlet commands as successful but never changes outlet state",
+}
+# How long a "timeout" fault holds a request open (released early when the mock stops).
+FAULT_HANG_SECONDS = 30
+
+
+def part_number(model_name: str, default: str) -> str:
+    """The part number in a display name: its first word containing a digit
+    ("Raritan Dominion PX DPXR8A-16" -> "DPXR8A-16")."""
+    for word in (model_name or "").split():
+        if any(ch.isdigit() for ch in word):
+            return word
+    return default
 
 
 class MockEquipmentHandler(BaseHTTPRequestHandler):
@@ -43,6 +66,8 @@ class MockEquipmentHandler(BaseHTTPRequestHandler):
     channel_count: int = 8
     voltage: float = 120.0
     outlet_states: Dict[int, int] = {}  # channel -> 1 (ON) or 0 (OFF)
+    fault: Optional[str] = None
+    stop_event: threading.Event = threading.Event()
 
     def log_message(self, format, *args):
         # Suppress standard http.server stdout logging during trials
@@ -72,10 +97,34 @@ class MockEquipmentHandler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             return None
 
+    def _is_connect_request(self, path: str, payload=None) -> bool:
+        """The request a driver makes in connect(); connection-level faults let it through."""
+        if self.vendor == "wti":
+            return path == "/api/v2/status/status"
+        return path == "/model/pdu/0" and isinstance(payload, dict) and payload.get("method") == "getMetaData"
+
+    def _fault_consumed(self, path: str, payload=None) -> bool:
+        """Apply connection-level faults. Returns True if the request was handled by the fault."""
+        if self.fault == "auth_fail":
+            self.send_response(401)
+            self.send_header("WWW-Authenticate", 'Basic realm="PDU"')
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return True
+        if self.fault in ("timeout", "drop") and not self._is_connect_request(path, payload):
+            if self.fault == "timeout":
+                self.stop_event.wait(FAULT_HANG_SECONDS)
+            # Close without sending a response.
+            self.close_connection = True
+            return True
+        return False
+
     def do_GET(self):
         url = urlparse(self.path)
         path = url.path.rstrip("/")
         query = parse_qs(url.query)
+        if self._fault_consumed(path):
+            return
 
         if self.vendor == "wti":
             if path == "/api/v2/status/status":
@@ -99,6 +148,8 @@ class MockEquipmentHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = urlparse(self.path).path.rstrip("/")
         payload = self._read_json_body()
+        if self._fault_consumed(path, payload):
+            return
 
         if self.vendor == "wti" and path == "/api/v2/config/powerplug":
             if not isinstance(payload, dict):
@@ -110,8 +161,11 @@ class MockEquipmentHandler(BaseHTTPRequestHandler):
             state = str(payload.get("state", "")).lower()
             if not 1 <= channel <= self.channel_count or state not in ("on", "off", "boot", "default"):
                 return self._send_json(200, _WTI_INVALID_PLUG)
-            # "boot" power-cycles and "default" restores the configured default -- both end up ON here.
-            self.outlet_states[channel] = 0 if state == "off" else 1
+            if self.fault == "command_error":
+                return self._send_json(200, _WTI_COMMAND_FAILED)
+            if self.fault != "stuck_outlet":
+                # "boot" power-cycles and "default" restores the configured default -- both end up ON here.
+                self.outlet_states[channel] = 0 if state == "off" else 1
             return self._send_json(200, {"status": _WTI_OK, "powerplugs": [self._wti_plug(channel)]})
 
         if self.vendor == "raritan":
@@ -144,7 +198,11 @@ class MockEquipmentHandler(BaseHTTPRequestHandler):
                     pstate = params.get("pstate")
                     if pstate not in (0, 1):
                         return self._send_json(200, _jsonrpc_error(req_id, -32602, "Invalid params"))
-                    self.outlet_states[channel] = pstate
+                    if self.fault == "command_error":
+                        # setPowerState returns a non-zero error code on failure.
+                        return self._send_json(200, _jsonrpc_result(req_id, 1))
+                    if self.fault != "stuck_outlet":
+                        self.outlet_states[channel] = pstate
                     return self._send_json(200, _jsonrpc_result(req_id, 0))
                 return self._send_json(200, _jsonrpc_error(req_id, -32601, "Method not found"))
 
@@ -153,7 +211,7 @@ class MockEquipmentHandler(BaseHTTPRequestHandler):
     # -- WTI payloads -------------------------------------------------------
 
     def _wti_unit_status(self) -> dict:
-        product = self.model_name.replace("WTI ", "").split()[0] if self.model_name else "VMR-HD4D20"
+        product = part_number(self.model_name, "VMR-HD4D20")
         return {
             "status": _WTI_OK,
             "vendor": "wti",
@@ -180,7 +238,7 @@ class MockEquipmentHandler(BaseHTTPRequestHandler):
     # -- Raritan payloads ---------------------------------------------------
 
     def _raritan_metadata(self) -> dict:
-        model = self.model_name.replace("Raritan ", "").split()[0] if self.model_name else "PX3-5460"
+        model = part_number(self.model_name, "PX3-5460")
         return {
             "nameplate": {
                 "manufacturer": "Raritan",
@@ -213,8 +271,9 @@ class MockEquipmentHandler(BaseHTTPRequestHandler):
 
 
 _WTI_OK = {"code": "0", "text": "OK"}
-# The WTI documentation doesn't show an error body; this shape is an assumption.
+# The WTI documentation doesn't show error bodies; these shapes are assumptions.
 _WTI_INVALID_PLUG = {"status": {"code": "1", "text": "Invalid plug"}}
+_WTI_COMMAND_FAILED = {"status": {"code": "2", "text": "Command failed"}}
 
 
 def _jsonrpc_result(req_id, ret) -> dict:
@@ -236,22 +295,27 @@ class ApcCliEngine:
     """Executes APC NMC CLI command lines against the mock's outlet state and
     returns the text the real CLI would print (without the trailing prompt)."""
 
-    def __init__(self, model_name: str, channel_count: int, outlet_states: Dict[int, int]):
+    def __init__(self, model_name: str, channel_count: int, outlet_states: Dict[int, int],
+                 fault: Optional[str] = None):
         self.model_name = model_name or "APC Switched Rack PDU"
         self.channel_count = channel_count
         self.outlet_states = outlet_states
+        self.fault = fault
 
     def banner(self) -> str:
+        # Layout copied from a Schneider/APC rack PDU login captured in
+        # openbmc-test-automation (lib/pdu/schneider.robot); only the date and time vary.
         now = datetime.now()
         return (
             "\r\n"
-            "American Power Conversion               Network Management Card AOS      v6.9.6\r\n"
-            "(c) Copyright 2020 All Rights Reserved  RPDU 2g Application               v6.9.6\r\n"
+            "Schneider Electric                      Network Management Card AOS      v6.9.6\r\n"
+            "(c) Copyright 2020 All Rights Reserved  RPDU 2g APP                      v6.9.6\r\n"
             "-------------------------------------------------------------------------------\r\n"
-            f"Name      : {self.model_name[:38]:<38}  Date : {now:%m/%d/%Y}\r\n"
-            f"Contact   : Unknown                                 Time : {now:%H:%M:%S}\r\n"
-            "Location  : Unknown                                 User : Administrator\r\n"
-            "Up Time   : 0 Days 0 Hours 1 Minute                 Stat : P+ N4+ N6+ A+\r\n"
+            f"Name      : apc566BF4                                 Date : {now:%m/%d/%Y}\r\n"
+            f"Contact   : Unknown                                   Time : {now:%H:%M:%S}\r\n"
+            "Location  : Unknown                                   User : Super User\r\n"
+            "Up Time   : 0 Days 12 Hours 17 Minutes                Stat : P+ N4+ N6+ A+\r\n"
+            "\r\n"
             "\r\n"
             "Type ? for command listing\r\n"
             "Use tcpip command for IP address(-i), subnet(-s), and gateway(-g)\r\n"
@@ -268,6 +332,16 @@ class ApcCliEngine:
 
         if command in ("exit", "quit", "bye"):
             return None
+        if command == "prodinfo":
+            # Key/value layout as documented by AVI-SPL's APC PDU driver (observed on an AP7920B).
+            return "\n".join([
+                "AOS:              v6.9.6",
+                "Switched Rack PDU: v6.9.6",
+                f"Model:            {part_number(self.model_name, 'AP7900')}",
+                f"Present Outlets:  {self.channel_count}",
+                "Max Current:      16 A",
+                "Present Phases:   1",
+            ])
         if command in ("olon", "oloff", "olstatus"):
             if not arg:
                 return "E102: Parameter Error"
@@ -281,13 +355,18 @@ class ApcCliEngine:
                     state = "On" if self.outlet_states.get(ch, 1) == 1 else "Off"
                     lines.append(f" {ch}: Outlet {ch}: {state}")
                 return "\n".join(lines)
-            for ch in channels:
-                self.outlet_states[ch] = 1 if command == "olon" else 0
+            if self.fault == "command_error":
+                return "E100: Command failed"
+            if self.fault != "stuck_outlet":
+                for ch in channels:
+                    self.outlet_states[ch] = 1 if command == "olon" else 0
             return "E000: Success"
         return "E101: Command Not Found"
 
 
 _HOST_KEY = None
+_SSH_SERVER_LOG = "equipment_drivers.simulator.ssh_server"
+logging.getLogger(_SSH_SERVER_LOG).setLevel(logging.CRITICAL)
 
 
 def _host_key():
@@ -299,15 +378,18 @@ def _host_key():
 
 if paramiko is not None:
     class _ApcSshInterface(paramiko.ServerInterface):
-        def __init__(self, username: Optional[str], password: Optional[str]):
+        def __init__(self, username: Optional[str], password: Optional[str], reject_all: bool = False):
             self.username = username
             self.password = password
+            self.reject_all = reject_all
             self.shell_requested = threading.Event()
 
         def get_allowed_auths(self, username):
             return "password"
 
         def check_auth_password(self, username, password):
+            if self.reject_all:
+                return paramiko.AUTH_FAILED
             if self.username is None or (username, password) == (self.username, self.password):
                 return paramiko.AUTH_SUCCESSFUL
             return paramiko.AUTH_FAILED
@@ -330,24 +412,26 @@ class _ApcSshServer:
     serve_forever/shutdown/server_close/server_port surface as HTTPServer so
     MockPduServer can drive either one."""
 
-    def __init__(self, address, engine_factory, username: Optional[str] = None, password: Optional[str] = None):
+    def __init__(self, address, engine_factory, username: Optional[str] = None, password: Optional[str] = None,
+                 fault: Optional[str] = None):
         if paramiko is None:
             raise RuntimeError("The APC mock server requires the 'paramiko' package (pip install paramiko)")
         self._engine_factory = engine_factory
         self._username = username
         self._password = password
+        self._fault = fault
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._sock.bind(address)
         self._sock.listen(5)
-        # Poll so shutdown() is noticed without relying on close() waking accept().
-        self._sock.settimeout(0.2)
         self.server_port = self._sock.getsockname()[1]
+        # accept() polls (see serve_forever) so shutdown() is noticed without relying on close() waking it.
         self._stopping = threading.Event()
         self._stopped = threading.Event()
         self._transports = []
 
-    def serve_forever(self):
+    def serve_forever(self, poll_interval: float = 0.2):
+        self._sock.settimeout(poll_interval)
         try:
             while not self._stopping.is_set():
                 try:
@@ -371,10 +455,13 @@ class _ApcSshServer:
 
     def _handle_client(self, client_sock):
         transport = paramiko.Transport(client_sock)
+        # Non-SSH clients (e.g. HTTP identify probes from discovery) are normal here; keep
+        # paramiko's server-side tracebacks out of the console.
+        transport.set_log_channel(_SSH_SERVER_LOG)
         self._transports.append(transport)
         try:
             transport.add_server_key(_host_key())
-            iface = _ApcSshInterface(self._username, self._password)
+            iface = _ApcSshInterface(self._username, self._password, reject_all=self._fault == "auth_fail")
             try:
                 transport.start_server(server=iface)
             except paramiko.SSHException:
@@ -392,6 +479,16 @@ class _ApcSshServer:
 
     def _run_shell(self, chan, engine: "ApcCliEngine"):
         chan.sendall((engine.banner() + APC_PROMPT).encode())
+        if self._fault == "timeout":
+            # Swallow everything and never answer, until the client gives up or the mock stops.
+            chan.settimeout(0.2)
+            while not self._stopping.is_set():
+                try:
+                    if not chan.recv(1024):
+                        return
+                except socket.timeout:
+                    continue
+            return
         line = ""
         last_was_cr = False
         while not self._stopping.is_set():
@@ -404,6 +501,9 @@ class _ApcSshServer:
                     continue
                 last_was_cr = ch == "\r"
                 if ch in "\r\n":
+                    if self._fault == "drop":
+                        chan.close()
+                        return
                     chan.sendall(b"\r\n")
                     output = engine.execute(line)
                     line = ""
@@ -430,7 +530,9 @@ class MockPduServer:
     """
     def __init__(self, vendor: str = "apc", channel_count: int = 8, port: int = 0,
                  model_name: str = "", model_signature: str = "", voltage: float = 120.0,
-                 username: Optional[str] = None, password: Optional[str] = None):
+                 username: Optional[str] = None, password: Optional[str] = None, fault: Optional[str] = None):
+        if fault is not None and fault not in FAULTS:
+            raise ValueError(f"Unknown fault '{fault}'. Choose from: {', '.join(FAULTS)}")
         self.vendor = vendor.lower()
         self.channel_count = channel_count
         self.requested_port = port
@@ -440,6 +542,8 @@ class MockPduServer:
         # Credentials the mock enforces; None accepts any login.
         self.username = username
         self.password = password
+        self.fault = fault
+        self._stop_event = threading.Event()
         self.server = None
         self.thread: Optional[threading.Thread] = None
         self.host = "127.0.0.1"
@@ -459,8 +563,8 @@ class MockPduServer:
         if self.vendor == "apc":
             self.server = _ApcSshServer(
                 (self.host, self.requested_port),
-                lambda: ApcCliEngine(self.model_name, self.channel_count, self.outlet_states),
-                username=self.username, password=self.password)
+                lambda: ApcCliEngine(self.model_name, self.channel_count, self.outlet_states, fault=self.fault),
+                username=self.username, password=self.password, fault=self.fault)
         else:
             class CustomHandler(MockEquipmentHandler):
                 pass
@@ -471,14 +575,22 @@ class MockPduServer:
             CustomHandler.voltage = self.voltage
             CustomHandler.channel_count = self.channel_count
             CustomHandler.outlet_states = self.outlet_states
-            self.server = HTTPServer((self.host, self.requested_port), CustomHandler)
+            CustomHandler.fault = self.fault
+            CustomHandler.stop_event = self._stop_event
+            # Threaded so a request held open by the "timeout" fault can't block shutdown.
+            self.server = ThreadingHTTPServer((self.host, self.requested_port), CustomHandler)
+            self.server.daemon_threads = True
+            self.server.block_on_close = False
 
         self.port = self.server.server_port
-        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self._stop_event.clear()
+        # A short poll interval keeps stop() fast (HTTPServer's default 0.5 s dominated trial runtimes).
+        self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
         self.thread.start()
         logger.debug(f"Started Mock {self.vendor.upper()} Server on {self.host}:{self.port}")
 
     def stop(self):
+        self._stop_event.set()
         if self.server:
             self.server.shutdown()
             self.server.server_close()
@@ -701,4 +813,95 @@ def run_pdu_blackbox_trial(sig: str, driver_cls, live_ip: str = None, live_port:
             print(f" RESULT: {RED}ONE OR MORE CHECKS FAILED FOR {model_name.upper()}{RESET}")
         print(f"------------------------------------------------------------------------{RESET}\n")
 
+    return all_passed
+
+
+def _fault_scenario(fault: str, driver, host: str, port: int) -> tuple:
+    """Run one fault against a fresh driver. Returns (passed, detail).
+
+    A pass means the driver turned the device failure into its own error
+    handling: an EquipmentError or success=False -- never an unexpected
+    exception type, and never a false success that a readback can't expose.
+    """
+    if fault == "auth_fail":
+        try:
+            driver.connect(host, port)
+        except EquipmentConnectionError as e:
+            return True, f"connect() raised EquipmentConnectionError: {e}"
+        return False, "connect() succeeded although every login is rejected"
+
+    driver.connect(host, port)
+    try:
+        if fault in ("timeout", "drop"):
+            try:
+                resp = driver.turn_off(1)
+            except EquipmentError as e:
+                return True, f"turn_off raised {type(e).__name__}: {e}"
+            return False, f"turn_off returned success={resp.success} from an unresponsive device"
+
+        if fault == "command_error":
+            try:
+                resp = driver.turn_off(1)
+            except EquipmentCommandError as e:
+                return True, f"turn_off raised EquipmentCommandError: {e}"
+            if resp.success:
+                return False, f"turn_off reported success for an error reply: {resp.raw.strip()}"
+            return True, f"turn_off returned success=False, raw: {resp.raw.strip()}"
+
+        if fault == "stuck_outlet":
+            resp = driver.turn_off(1)
+            status = driver.get_status(1).status
+            if status == "OFF":
+                return False, "readback shows OFF although the outlet never changed"
+            return True, (f"turn_off reported success={resp.success} (the device claims success); "
+                          f"readback shows {status}, exposing the stuck outlet")
+    finally:
+        try:
+            driver.disconnect()
+        except Exception:
+            pass
+    raise ValueError(f"No scenario for fault '{fault}'")
+
+
+def run_pdu_fault_trial(sig: str, driver_cls, verbose: bool = True, timeout: float = 1.0) -> bool:
+    """
+    Runs every simulated fault (see FAULTS) against one PDU model and checks the
+    driver reports each failure through its own error handling. Driver timeouts
+    are shortened to `timeout` seconds so the run stays quick.
+    """
+    vendor = determine_vendor(sig, driver_cls)
+    temp_driver = driver_cls()
+    model_name = temp_driver.get_model()
+    max_channels = temp_driver.get_max_channel()
+    voltage = determine_voltage(sig, model_name)
+
+    if verbose:
+        print(f"\n{BOLD}========================================================================")
+        print(f" FAULT TRIAL: {model_name}")
+        print(f" Signature: {sig} | Vendor Family: {vendor.upper()} | Faults: {len(FAULTS)}")
+        print(f"========================================================================{RESET}")
+
+    all_passed = True
+    for step_no, fault in enumerate(FAULTS, start=1):
+        with MockPduServer(vendor=vendor, channel_count=max_channels, model_name=model_name,
+                           model_signature=sig, voltage=voltage, fault=fault) as server:
+            driver = driver_cls()
+            driver.timeout = timeout
+            started = time.monotonic()
+            try:
+                passed, detail = _fault_scenario(fault, driver, server.host, server.port)
+            except Exception as e:
+                passed, detail = False, f"unexpected {type(e).__name__}: {e}"
+            elapsed = time.monotonic() - started
+        all_passed = all_passed and passed
+        if verbose:
+            tag = f"{GREEN}[PASS]{RESET}" if passed else f"{RED}[FAIL]{RESET}"
+            print(f"\n{BOLD}Fault {step_no}: {fault}{RESET} ({FAULTS[fault]}) -> {tag} {DIM}[{elapsed:.1f}s]{RESET}")
+            print(f"  {DIM}{detail}{RESET}")
+
+    if verbose:
+        print(f"\n{BOLD}------------------------------------------------------------------------")
+        verdict = (f"{GREEN}ALL FAULTS HANDLED" if all_passed else f"{RED}ONE OR MORE FAULTS MISHANDLED")
+        print(f" RESULT: {verdict} FOR {model_name.upper()}{RESET}")
+        print(f"------------------------------------------------------------------------{RESET}\n")
     return all_passed

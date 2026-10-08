@@ -13,7 +13,7 @@ import sys
 
 import equipment_drivers  # noqa: trigger auto-import of all drivers
 from equipment_drivers.registry import registry
-from equipment_drivers.simulator import run_pdu_blackbox_trial, run_pdu_mock_action
+from equipment_drivers.simulator import run_pdu_blackbox_trial, run_pdu_fault_trial, run_pdu_mock_action
 
 BOLD = "\033[1m"
 CYAN = "\033[96m"
@@ -50,7 +50,7 @@ def list_all_models():
         print()
 
 
-def run_vendor(vendor_name: str) -> bool:
+def run_vendor(vendor_name: str, trial=run_pdu_blackbox_trial) -> bool:
     all_drivers = dict(registry.get_all_drivers("pdu"))
     matches = {sig: cls for sig, cls in all_drivers.items()
                if sig.startswith(vendor_name.lower() + "_")}
@@ -60,7 +60,7 @@ def run_vendor(vendor_name: str) -> bool:
 
     results = {}
     for sig, cls in sorted(matches.items()):
-        passed = run_pdu_blackbox_trial(sig, cls, verbose=True)
+        passed = trial(sig, cls, verbose=True)
         results[sig] = passed
 
     total = len(results)
@@ -76,12 +76,12 @@ def run_vendor(vendor_name: str) -> bool:
     return ok == total
 
 
-def run_all() -> bool:
+def run_all(trial=run_pdu_blackbox_trial) -> bool:
     all_drivers = dict(registry.get_all_drivers("pdu"))
     sigs = [(sig, cls) for sig, cls in sorted(all_drivers.items()) if not sig.startswith("dummy")]
     results = {}
     for sig, cls in sigs:
-        passed = run_pdu_blackbox_trial(sig, cls, verbose=True)
+        passed = trial(sig, cls, verbose=True)
         results[sig] = passed
 
     total = len(results)
@@ -155,6 +155,9 @@ def main():
     parser.add_argument("--model", type=str, help="Driver signature to trial (e.g. apc_ap7900)")
     parser.add_argument("--vendor", type=str, help="Trial all models for a vendor (apc, wti, raritan)")
     parser.add_argument("--all", action="store_true", help="Trial all registered models")
+    parser.add_argument("--faults", action="store_true",
+                        help="With --model/--vendor/--all: run the fault trial (auth failure, timeout, dropped "
+                             "connection, command error, stuck outlet) instead of the 9-step trial")
     parser.add_argument("--action", choices=["on", "off", "status"],
                         help="Run a single action instead of a full trial")
     parser.add_argument("--channel", type=str, default="1",
@@ -171,12 +174,14 @@ def main():
         list_all_models()
         return
 
+    trial = run_pdu_fault_trial if args.faults else run_pdu_blackbox_trial
+
     if args.all:
-        ok = run_all()
+        ok = run_all(trial)
         sys.exit(0 if ok else 1)
 
     if args.vendor:
-        ok = run_vendor(args.vendor)
+        ok = run_vendor(args.vendor, trial)
         sys.exit(0 if ok else 1)
 
     if args.model:
@@ -188,7 +193,7 @@ def main():
         if args.action:
             ok = run_pdu_mock_action(args.model, cls, args.action, args.channel)
         else:
-            ok = run_pdu_blackbox_trial(args.model, cls)
+            ok = trial(args.model, cls)
 
         sys.exit(0 if ok else 1)
 

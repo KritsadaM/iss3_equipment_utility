@@ -1,0 +1,6 @@
+AOS:              2.5.3.2
+Switched Rack PDU: 2.5.2.5
+Model:            AP7920B
+Present Outlets:  8
+Max Current:      10 A
+Present Phases:   1

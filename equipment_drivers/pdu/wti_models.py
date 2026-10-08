@@ -49,6 +49,31 @@ class BaseWtiPduDriver(PDUDriver):
             return ip.endswith(cls.IP_SUFFIX)
         return False
 
+    @classmethod
+    def identify(cls, ip: str, port: Optional[int] = None, username: Optional[str] = None,
+                 password: Optional[str] = None, timeout: float = 3.0) -> Optional[str]:
+        """
+        Ask the device what it is. Returns the `product` the unit reports in
+        /api/v2/status/status (e.g. "VMR-HD4D20"), "" if it is a WTI unit that
+        didn't report one, or None if the device doesn't answer the WTI API.
+        """
+        defaults = cls()
+        port = port or cls.DEFAULT_PORT
+        scheme = "https" if port == 443 else "http"
+        auth = HTTPBasicAuth(username or defaults.username, password or defaults.password)
+        try:
+            response = defaults.session.get(f"{scheme}://{ip}:{port}/api/v2/status/status", auth=auth, timeout=timeout)
+            response.raise_for_status()
+            data = response.json()
+        except (requests.exceptions.RequestException, ValueError) as e:
+            logger.debug(f"WTI identify: no WTI API at {ip}:{port}: {e}")
+            return None
+        finally:
+            defaults.session.close()
+        if not _status_ok(data) or str(data.get("vendor", "")).lower() != "wti":
+            return None
+        return str(data.get("product", ""))
+
     def connect(self, ip: str, port: Optional[int] = None, username: Optional[str] = None,
                 password: Optional[str] = None) -> bool:
         self.ip = ip
@@ -96,6 +121,9 @@ class BaseWtiPduDriver(PDUDriver):
             plugs = response.json().get("powerplugs")
             if isinstance(plugs, list) and plugs:
                 return len(plugs)
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            # The device stopped answering; don't retry with a guessed count.
+            raise EquipmentConnectionError(f"WTI PDU stopped responding: {e}")
         except Exception as e:
             logger.warning(f"Could not query channel count from {self.get_model()}, falling back to default: {e}")
         return self.DEFAULT_CHANNEL_COUNT

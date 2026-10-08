@@ -115,8 +115,17 @@ equipment_drivers/
     └── dummy_daq.py
 ```
 
-1. **Discovery** (`discover_and_instantiate`) asks every driver registered under the requested equipment type, in turn, "is this you?" via a `probe(ip, port)` classmethod. The first driver to say yes gets instantiated.
-2. Drivers registered under the conventional `dummy_{equipment_type}_sig` signature are held back and used only as a last-resort fallback if nothing else matches — useful in dev/test, but something to phase out per equipment type once every real vendor has a working `probe()`.
+1. **Discovery** (`discover_and_instantiate`) first **asks the device what it is**, trying every vendor's protocol in parallel (3 s each):
+
+   | Vendor | How the model is read |
+   |---|---|
+   | APC | SSH login banner says "Network Management Card", then `prodInfo` → `Model:` |
+   | WTI | `GET /api/v2/status/status` → `product` |
+   | Raritan | JSON-RPC `getMetaData` → `nameplate.model` |
+
+   The reported part number is matched to a model in `models.yaml` (e.g. `AP7920B` → `apc_ap7920`). If a known vendor reports a model that isn't listed, a generic driver for that vendor is used and the outlet count is read from the device. This needs the right credentials (`--username`/`--password` or `PDU_USERNAME`/`PDU_PASSWORD`).
+2. If no device answers, discovery falls back to the IP-address convention: each driver's `probe(ip, port)` (today, the `suffix` in `models.yaml`), and logs a warning that it guessed.
+3. Drivers registered under the conventional `dummy_{equipment_type}_sig` signature are used only as a last resort if nothing else matches.
 3. Once a driver is instantiated, the utility calls `connect()`, runs the requested action, and calls `disconnect()`.
 
 ### PDU responses
@@ -141,6 +150,26 @@ iss_pdu_utility_eng --mock --model apc_ap7900 status all   # in-process mock
 iss_trial_utility --all                                    # 9-step trial of every model
 iss_mock_server --vendor apc                               # standalone: ssh -p 2222 apc@127.0.0.1
 ```
+
+#### Simulating faults
+
+The mock can misbehave on purpose so error handling can be tested without hardware:
+
+| `--fault` | The simulated PDU... |
+|---|---|
+| `auth_fail` | rejects every login (HTTP 401 / SSH auth failure) |
+| `timeout` | accepts the connection, then never answers a command |
+| `drop` | accepts the connection, then drops it on the first command |
+| `command_error` | answers outlet commands with the vendor's error reply (`E100`, WTI status code ≠ 0, Raritan `_ret_` ≠ 0) |
+| `stuck_outlet` | reports outlet commands as successful but never changes outlet state |
+
+```bash
+iss_pdu_utility --buyoff --model wti_vmr_hd4d20 --fault timeout off 1   # see what operators would see
+iss_mock_server --vendor raritan --fault drop                            # standalone faulty PDU
+iss_trial_utility --all --faults                                          # every model x every fault
+```
+
+`stuck_outlet` is the one fault the utility can't detect by itself: the PDU claims success, so it exits 0. Only reading the state back (`status`) shows the outlet didn't change.
 
 ## Adding a new driver
 
