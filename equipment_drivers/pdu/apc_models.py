@@ -1,6 +1,7 @@
 import logging
 import re
-from typing import Dict, Optional, Tuple
+from dataclasses import dataclass
+from typing import Dict, Optional, Pattern, Tuple
 from equipment_drivers.interfaces import PDUDriver
 from equipment_drivers.responses import PDUResponse
 from equipment_drivers.cli_transport import SshCliTransport
@@ -8,14 +9,42 @@ from equipment_drivers.exceptions import EquipmentCommandError, EquipmentConnect
 
 logger = logging.getLogger(__name__)
 
-# Result codes printed by the APC NMC CLI ("E000: Success", "E102: Parameter Error", ...).
-# E000/E001 mean the command was accepted; everything else is a failure.
+# APC NMC CLI replies carry a result code ("E000: Success", "E102: Parameter Error", ...);
+# E000/E001 mean the command was accepted. 1st generation firmware signals success
+# with a literal "OK" line instead and only prints a code on failure.
 _APC_SUCCESS_CODES = ("000", "001")
 _RESULT_CODE_RE = re.compile(r"^\s*E(\d{3}):", re.MULTILINE)
-# olStatus lines look like " 3: Outlet 3: On" -- number, outlet name, state.
-# prodInfo prints "Key: value" lines, one of them "Model:            AP7920B".
+_OK_RE = re.compile(r"^\s*OK\s*$", re.MULTILINE)
+# prodInfo (2nd gen) and ver (1st gen) both print a "Model: AP7920B" line.
 _MODEL_RE = re.compile(r"^\s*Model\s*:\s*(\S+)", re.MULTILINE)
-_OUTLET_LINE_RE = re.compile(r"^\s*(\d+):\s*(.*?):\s*(On|Off)\b", re.MULTILINE | re.IGNORECASE)
+# ver (1st gen) prints "Outlets: 8".
+_OUTLET_COUNT_RE = re.compile(r"^\s*Outlets\s*:\s*(\d+)", re.MULTILINE)
+
+
+@dataclass(frozen=True)
+class CliDialect:
+    """
+    The two APC rack PDU firmware generations speak different CLI dialects
+    (documented in AVI-SPL's APC PDU driver, tested on real units):
+
+      rpdu2g (2nd gen): olOn / olOff / olStatus / prodInfo; " 3: Outlet 3: On"
+      rpdu   (1st gen): on / off / status / ver;            "3:ON:Outlet 3"
+
+    The status lines put name and state in opposite orders, so each dialect
+    has its own pattern; the groups are always (number, state).
+    """
+    name: str
+    on: str
+    off: str
+    status: str
+    identity: str
+    outlet_re: Pattern
+
+
+RPDU2G = CliDialect("rpdu2g", "olOn", "olOff", "olStatus", "prodInfo",
+                    re.compile(r"^\s*(\d+):\s*.*?:\s*(On|Off)\b", re.MULTILINE | re.IGNORECASE))
+RPDU = CliDialect("rpdu", "on", "off", "status", "ver",
+                  re.compile(r"^\s*(\d+)\s*:\s*(ON|OFF)\s*:", re.MULTILINE | re.IGNORECASE))
 
 
 def parse_result_code(output: str) -> Optional[str]:
@@ -24,15 +53,35 @@ def parse_result_code(output: str) -> Optional[str]:
     return match.group(1) if match else None
 
 
-def parse_model(prod_info: str) -> Optional[str]:
-    """Return the value of the 'Model:' line from `prodInfo` output (e.g. 'AP7920B')."""
-    match = _MODEL_RE.search(prod_info)
+def command_succeeded(output: str) -> bool:
+    """True for 'E000'/'E001' (2nd gen) or a bare 'OK' line (1st gen) with no error code."""
+    code = parse_result_code(output)
+    if code is not None:
+        return code in _APC_SUCCESS_CODES
+    return bool(_OK_RE.search(output))
+
+
+def parse_model(identity: str) -> Optional[str]:
+    """Return the value of the 'Model:' line from `prodInfo` / `ver` output (e.g. 'AP7920B')."""
+    match = _MODEL_RE.search(identity)
     return match.group(1) if match else None
 
 
-def parse_outlet_states(output: str) -> Dict[int, str]:
-    """Map outlet number -> 'ON'/'OFF' from olStatus output."""
-    return {int(num): state.upper() for num, _name, state in _OUTLET_LINE_RE.findall(output)}
+def parse_outlet_states(output: str, dialect: CliDialect = RPDU2G) -> Dict[int, str]:
+    """Map outlet number -> 'ON'/'OFF' from olStatus / status output."""
+    return {int(num): state.upper() for num, state in dialect.outlet_re.findall(output)}
+
+
+def detect_dialect(about_output: str) -> CliDialect:
+    """
+    Pick the dialect from the reply to `about`, as AVI-SPL does: 1st gen firmware
+    rejects `about` with an error code; 2nd gen reports Application Module
+    "Name: rpdu2g". Anything else falls back to 1st gen.
+    """
+    code = parse_result_code(about_output)
+    if code is not None and code not in _APC_SUCCESS_CODES:
+        return RPDU
+    return RPDU2G if re.search(r"\brpdu2g\b", about_output, re.IGNORECASE) else RPDU
 
 
 class BaseApcPduDriver(PDUDriver):
@@ -40,8 +89,9 @@ class BaseApcPduDriver(PDUDriver):
     Base driver for APC Switched Rack PDUs (AP79xx / AP89xx / AP86xx series).
 
     APC Network Management Cards have no REST API for outlet control; this
-    driver uses the NMC command line over SSH (olOn / olOff / olStatus), so
-    PDUResponse.raw is the CLI text the PDU printed, e.g.:
+    driver uses the NMC command line over SSH, in whichever dialect the
+    firmware speaks (see CliDialect), so PDUResponse.raw is the CLI text the
+    PDU printed, e.g. on 2nd gen firmware:
 
         E000: Success
          3: Outlet 3: On
@@ -62,6 +112,7 @@ class BaseApcPduDriver(PDUDriver):
         self.password = "apc"
         self.timeout = 10
         self.transport = None
+        self.dialect: Optional[CliDialect] = None
         self._device_channel_count: Optional[int] = None
 
     @classmethod
@@ -75,8 +126,9 @@ class BaseApcPduDriver(PDUDriver):
                  password: Optional[str] = None, timeout: float = 3.0, **_http_options) -> Optional[str]:
         """
         Log in and ask the device what it is. Returns the model the PDU reports
-        via `prodInfo` (e.g. "AP7920B"), "" if it is an APC NMC that didn't
-        report a model, or None if the device doesn't speak the APC NMC CLI.
+        via `prodInfo` (2nd gen) or `ver` (1st gen), e.g. "AP7920B"; "" if it is
+        an APC NMC that didn't report a model; or None if the device doesn't
+        speak the APC NMC CLI.
         """
         defaults = cls()
         transport = cls.transport_factory()
@@ -89,11 +141,15 @@ class BaseApcPduDriver(PDUDriver):
         try:
             if "Network Management Card" not in getattr(transport, "banner", ""):
                 return None
-            try:
-                return parse_model(transport.send("prodInfo")) or ""
-            except Exception as e:
-                logger.debug(f"APC identify: prodInfo failed at {ip}: {e}")
-                return ""
+            for dialect in (RPDU2G, RPDU):
+                try:
+                    model = parse_model(transport.send(dialect.identity))
+                except Exception as e:
+                    logger.debug(f"APC identify: {dialect.identity} failed at {ip}: {e}")
+                    return ""
+                if model:
+                    return model
+            return ""
         finally:
             transport.close()
 
@@ -127,6 +183,7 @@ class BaseApcPduDriver(PDUDriver):
             self.transport.close()
             self.transport = None
         self.connected = False
+        self.dialect = None
         self._device_channel_count = None
         disp_ip = getattr(self, "display_ip", None) or self.ip
         disp_port = getattr(self, "display_port", None) or self.port
@@ -136,14 +193,27 @@ class BaseApcPduDriver(PDUDriver):
     def get_model(self) -> str:
         return self.MODEL_NAME
 
+    def _get_dialect(self) -> CliDialect:
+        """The firmware's CLI dialect, asked once per session."""
+        if self.dialect is None:
+            self.dialect = detect_dialect(self._run("about"))
+            logger.info(f"{self.get_model()} speaks the {self.dialect.name} CLI")
+        return self.dialect
+
     def get_channel_count(self) -> int:
         if not self.connected:
             return self.DEFAULT_CHANNEL_COUNT
         # Queried once per session: validate_channel() calls this before every action.
         if self._device_channel_count is None:
             try:
-                states = parse_outlet_states(self._run("olStatus all"))
-                self._device_channel_count = max(states) if states else self.DEFAULT_CHANNEL_COUNT
+                dialect = self._get_dialect()
+                if dialect is RPDU2G:
+                    states = parse_outlet_states(self._run("olStatus all"), dialect)
+                    count = max(states) if states else None
+                else:
+                    match = _OUTLET_COUNT_RE.search(self._run("ver"))
+                    count = int(match.group(1)) if match else None
+                self._device_channel_count = count or self.DEFAULT_CHANNEL_COUNT
             except EquipmentConnectionError:
                 raise  # the device stopped answering; don't retry with a guessed count
             except Exception as e:
@@ -164,32 +234,38 @@ class BaseApcPduDriver(PDUDriver):
             logger.error(f"CLI command '{command}' failed on {self.get_model()}: {e}")
             raise EquipmentCommandError(f"APC CLI command '{command}' failed: {e}")
 
-    def _run_outlet_command(self, command: str, channel: int) -> Tuple[bool, str]:
+    def _run_outlet_command(self, verb: str, channel: int) -> Tuple[bool, str]:
+        """verb is a CliDialect field name: 'on', 'off' or 'status'."""
         if not self.connected:
             raise EquipmentNotConnectedError("Not connected to PDU")
         self.validate_channel(channel)
+        command = getattr(self._get_dialect(), verb)
         raw = self._run(f"{command} {channel}")
-        code = parse_result_code(raw)
-        if code not in _APC_SUCCESS_CODES:
+        if verb == "status":
+            # Some firmware omits the OK marker before status lines; a parsable line is enough.
+            ok = command_succeeded(raw) or (parse_result_code(raw) is None and
+                                            channel in parse_outlet_states(raw, self.dialect))
+        else:
+            ok = command_succeeded(raw)
+        if not ok:
             logger.error(f"{command} {channel} on {self.get_model()} returned: {raw.strip() or '<no output>'}")
-            return False, raw
-        return True, raw
+        return ok, raw
 
     def turn_on(self, channel: int) -> PDUResponse:
         logger.info(f"Turning ON channel {channel} on {self.get_model()}")
-        success, raw = self._run_outlet_command("olOn", channel)
+        success, raw = self._run_outlet_command("on", channel)
         return PDUResponse(success=success, action="turn_on", channel=channel, raw=raw)
 
     def turn_off(self, channel: int) -> PDUResponse:
         logger.info(f"Turning OFF channel {channel} on {self.get_model()}")
-        success, raw = self._run_outlet_command("olOff", channel)
+        success, raw = self._run_outlet_command("off", channel)
         return PDUResponse(success=success, action="turn_off", channel=channel, raw=raw)
 
     def get_status(self, channel: int) -> PDUResponse:
-        success, raw = self._run_outlet_command("olStatus", channel)
+        success, raw = self._run_outlet_command("status", channel)
         status = None
         if success:
-            status = parse_outlet_states(raw).get(channel)
+            status = parse_outlet_states(raw, self.dialect).get(channel)
             if status is None:
                 success = False
                 status = "UNKNOWN"

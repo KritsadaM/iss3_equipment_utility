@@ -1,0 +1,22 @@
+Hardware Factory
+---------------
+Model Number:           AP7920B
+Serial Number:          2A2548L01451
+Hardware Revision:      B3
+Manufacture Date:       11/25/2025
+
+Network Management Card
+---------------
+Model Number:           0N-1570-07K
+Serial Number:          2A2547L16570
+
+Application Module
+---------------
+Name:                   rpdu2g
+Version:                v2.5.2.5
+Time:                   05:52:41
+
+APC OS(AOS)
+---------------
+Name:                   aos
+Version:                v2.5.3.2

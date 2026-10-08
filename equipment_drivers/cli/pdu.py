@@ -12,7 +12,9 @@ import sys
 import time
 
 import equipment_drivers  # noqa: F401 -- triggers driver registration
-from equipment_drivers.discovery import discover_and_instantiate
+from equipment_drivers.discovery import (discover_and_instantiate, generic_driver_class,
+                                         match_reported_model)
+from equipment_drivers.pdu.snmp_drivers import identify_snmp, snmp_driver_class
 from equipment_drivers.registry import registry
 from equipment_drivers.channel_spec import parse_channels
 from equipment_drivers.exceptions import EquipmentConnectionError
@@ -34,12 +36,16 @@ VERIFY_ATTEMPTS = 3
 VERIFY_INTERVAL = 1.0
 
 
-def resolve_pdu_driver(model_arg, ip_arg, port_arg, is_buyoff, username=None, password=None, http_options=None):
+def resolve_pdu_driver(model_arg, ip_arg, port_arg, is_buyoff, username=None, password=None, http_options=None,
+                       snmp_options=None):
     """
     Resolves (signature, driver_class, display_ip, display_port).
     Handles explicit model signature, auto-discovery, and Buy-off defaults.
     Against a real PDU, discovery asks the device for its model first and only
-    falls back to the IP-address convention if it doesn't answer.
+    falls back to the IP-address convention if it doesn't answer. With
+    snmp_options ({"community", "version"}) the device is asked over SNMP instead.
+    The returned class is the model's native driver; _execute swaps in its SNMP
+    counterpart when --snmp is used.
     """
     https = bool((http_options or {}).get("use_https"))
 
@@ -47,6 +53,8 @@ def resolve_pdu_driver(model_arg, ip_arg, port_arg, is_buyoff, username=None, pa
         # No --port given: use the vendor's own default (APC 22/SSH, WTI and Raritan 80/HTTP, 443 with --https).
         if port_arg is not None:
             return port_arg
+        if snmp_options is not None:
+            return 161
         default = getattr(cls, "DEFAULT_PORT", 80)
         return 443 if https and default == 80 else default
 
@@ -68,6 +76,9 @@ def resolve_pdu_driver(model_arg, ip_arg, port_arg, is_buyoff, username=None, pa
             sys.exit(1)
         display_ip = ip_arg or "192.168.1.50"
         return sig, driver_cls, display_ip, port_for(driver_cls)
+
+    if ip_arg and not is_buyoff and snmp_options is not None:
+        return _resolve_over_snmp(ip_arg, port, snmp_options, all_drivers, port_for)
 
     if ip_arg and not is_buyoff:
         driver_instance = discover_and_instantiate(ip_arg, port, "pdu", username=username, password=password,
@@ -107,6 +118,34 @@ def resolve_pdu_driver(model_arg, ip_arg, port_arg, is_buyoff, username=None, pa
     return sig, driver_cls, "192.168.1.50", port_for(driver_cls)
 
 
+def _resolve_over_snmp(ip, port, snmp_options, all_drivers, port_for):
+    from equipment_drivers.pdu.apc_models import BaseApcPduDriver
+    from equipment_drivers.pdu.raritan_models import BaseRaritanPduDriver
+    found = identify_snmp(ip, port, snmp_options["community"], snmp_options["version"])
+    if found:
+        vendor, reported = found
+        base = {"apc": BaseApcPduDriver, "raritan": BaseRaritanPduDriver}[vendor]
+        match = match_reported_model(base, reported, list(all_drivers.items()))
+        if match:
+            sig, driver_cls = match
+            logger.info(f"Device at {ip} reports '{reported}' over SNMP -> {driver_cls.__name__} (signature: {sig})")
+            return sig, driver_cls, ip, port_for(driver_cls)
+        driver_cls = generic_driver_class(base, reported)
+        logger.warning(f"Device at {ip} reports '{reported}' over SNMP, which is not in models.yaml; "
+                       f"using a generic {vendor.upper()} driver.")
+        return None, driver_cls, ip, port_for(driver_cls)
+
+    guess = discover_and_instantiate(ip, port, "pdu", identify=False)
+    sig = next((s for s, c in all_drivers.items() if c is type(guess)), None)
+    if guess is None or sig == "dummy_pdu_sig":
+        logger.error(f"No SNMP agent answered at {ip}:{port or 161} with a known PDU MIB, and its address matches "
+                     "no known model. Check that SNMP is enabled and the community string (--community / "
+                     "PDU_SNMP_COMMUNITY), or force a driver with --model.")
+        sys.exit(1)
+    logger.warning(f"No SNMP answer from {ip}; guessed {type(guess).__name__} from its IP address.")
+    return sig, type(guess), ip, port_for(type(guess))
+
+
 def main(argv=None, engineering: bool = False):
     # Line-buffered stdout keeps prints and log lines in order when piped.
     if hasattr(sys.stdout, "reconfigure"):
@@ -136,6 +175,13 @@ def main(argv=None, engineering: bool = False):
     parser.add_argument("--password", default=None,
                         help="Password override for the PDU (falls back to PDU_PASSWORD env var, then driver default). "
                              "Prefer the env var over this flag to avoid the password showing up in shell history.")
+    parser.add_argument("--snmp", action="store_true",
+                        help="Control APC/Raritan outlets over SNMP (PowerNet-MIB / PDU2-MIB) instead of SSH/HTTP. "
+                             "Default port 161.")
+    parser.add_argument("--community", default=None,
+                        help="SNMP write community (falls back to PDU_SNMP_COMMUNITY env var, then 'private')")
+    parser.add_argument("--snmp-version", choices=["1", "2c"], default=None,
+                        help="SNMP version (default: 1 for APC, whose NMC has no v2c, and 2c for Raritan)")
     parser.add_argument("--https", action="store_true",
                         help="Use HTTPS for WTI/Raritan on any port (default: HTTPS only on port 443)")
     parser.add_argument("--insecure", action="store_true",
@@ -170,6 +216,9 @@ def main(argv=None, engineering: bool = False):
             sys.exit(1)
     elif not args.ip_address:
         parser.error("the following arguments are required: --ip_address (unless in Buy-off mode)")
+
+    if (args.community or args.snmp_version) and not args.snmp:
+        parser.error("--community and --snmp-version only apply with --snmp")
 
     if args.event_dir:
         try:
@@ -300,23 +349,36 @@ def _execute(args, username, password, report) -> int:
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         logger.warning("TLS certificate verification is disabled (--insecure).")
 
+    snmp_options = None
+    if args.snmp:
+        snmp_options = {"community": args.community or os.environ.get("PDU_SNMP_COMMUNITY") or "private",
+                        "version": args.snmp_version}
+
     sig, driver_cls, display_ip, display_port = resolve_pdu_driver(
         args.model, args.ip_address, args.port, args.buyoff, username=username, password=password,
-        http_options=http_options,
+        http_options=http_options, snmp_options=snmp_options,
     )
     report.target(display_ip, display_port)
 
+    native_cls = driver_cls
+    if args.snmp:
+        try:
+            driver_cls = snmp_driver_class(native_cls)
+        except ValueError as e:
+            logger.error(str(e))
+            return 1
+
     mock_server = None
     if args.buyoff:
-        vendor = determine_vendor(sig, driver_cls)
-        temp_inst = driver_cls()
+        vendor = determine_vendor(sig, native_cls)
+        temp_inst = native_cls()
         model_name = temp_inst.get_model()
         max_ch = temp_inst.get_max_channel()
         voltage = determine_voltage(sig, model_name)
 
         mock_server = MockPduServer(vendor=vendor, channel_count=max_ch, model_name=model_name,
                                     model_signature=sig, voltage=voltage, fault=args.fault,
-                                    tls=args.https and vendor != "apc")
+                                    tls=args.https and vendor != "apc" and not args.snmp, snmp=args.snmp)
         mock_server.start()
         if args.fault:
             report._say(f"[BUY-OFF] Simulating fault '{args.fault}': {FAULTS[args.fault]}")
@@ -329,6 +391,11 @@ def _execute(args, username, password, report) -> int:
     driver.display_port = display_port
     driver.use_https = http_options["use_https"]
     driver.verify_tls = http_options["verify_tls"]
+    if snmp_options:
+        driver.community = snmp_options["community"]
+        driver.snmp_version = snmp_options["version"]
+        # SNMP v1/v2c has no login; never send PDU_USERNAME/PDU_PASSWORD over it.
+        username = password = None
 
     try:
         if not driver.connect(target_ip, target_port, username=username, password=password):

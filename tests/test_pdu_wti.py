@@ -36,7 +36,7 @@ class TestWtiDrivers(unittest.TestCase):
             self.assertEqual(driver.get_channel_count(), driver.get_max_channel())
 
     def test_sample_channel_counts(self):
-        self.assertEqual(WTI_MODELS['wti_vmr_hd4d20']().get_max_channel(), 20)
+        self.assertEqual(WTI_MODELS['wti_vmr_hd4d20']().get_max_channel(), 4)  # (4) C19, per wti.com
         self.assertEqual(WTI_MODELS['wti_vmr_16hd20']().get_max_channel(), 16)
         self.assertEqual(WTI_MODELS['wti_vmr_24hd20']().get_max_channel(), 24)
         self.assertEqual(WTI_MODELS['wti_nps_8hd20']().get_max_channel(), 8)

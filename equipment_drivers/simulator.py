@@ -298,7 +298,7 @@ def _jsonrpc_error(req_id, code: int, message: str) -> dict:
 # APC NMC CLI simulator (served over SSH, like the real Network Management Card)
 # ---------------------------------------------------------------------------
 
-APC_PROMPT = "apc>"
+APC_GENERATIONS = ("rpdu2g", "rpdu")
 
 
 class ApcCliEngine:
@@ -306,13 +306,31 @@ class ApcCliEngine:
     returns the text the real CLI would print (without the trailing prompt)."""
 
     def __init__(self, model_name: str, channel_count: int, outlet_states: Dict[int, int],
-                 fault: Optional[str] = None):
+                 fault: Optional[str] = None, generation: str = "rpdu2g"):
+        if generation not in APC_GENERATIONS:
+            raise ValueError(f"Unknown APC firmware generation '{generation}'. Choose from: {', '.join(APC_GENERATIONS)}")
         self.model_name = model_name or "APC Switched Rack PDU"
         self.channel_count = channel_count
         self.outlet_states = outlet_states
         self.fault = fault
+        self.generation = generation
+
+    @property
+    def prompt(self) -> str:
+        # 1st gen firmware prompts "APC>", 2nd gen "apc>" (per AVI-SPL's driver).
+        return "APC>" if self.generation == "rpdu" else "apc>"
 
     def banner(self) -> str:
+        if self.generation == "rpdu":
+            # Assumed layout: the AOS banner of a 1st gen (rpdu) unit has not been seen
+            # verbatim; firmware versions are the ones AVI-SPL documents for `ver`.
+            return (
+                "\r\n"
+                "American Power Conversion               Network Management Card AOS      v2.7.0\r\n"
+                "(c) Copyright 2004 All Rights Reserved  Switched Rack PDU APP            v2.7.3\r\n"
+                "-------------------------------------------------------------------------------\r\n"
+                "\r\n"
+            )
         # Layout copied from a Schneider/APC rack PDU login captured in
         # openbmc-test-automation (lib/pdu/schneider.robot); only the date and time vary.
         now = datetime.now()
@@ -342,6 +360,34 @@ class ApcCliEngine:
 
         if command in ("exit", "quit", "bye"):
             return None
+        if self.generation == "rpdu":
+            return self._execute_rpdu(command, arg)
+        if command == "about":
+            # Verbatim from AVI-SPL's driver tests (an AP7920B), with the model substituted.
+            return "\n".join([
+                "E000: Success",
+                "Hardware Factory",
+                "---------------",
+                f"Model Number:           {part_number(self.model_name, 'AP7900')}",
+                "Serial Number:          2A2548L01451",
+                "Hardware Revision:      B3",
+                "Manufacture Date:       11/25/2025",
+                "",
+                "Network Management Card",
+                "---------------",
+                "Model Number:           0N-1570-07K",
+                "Serial Number:          2A2547L16570",
+                "",
+                "Application Module",
+                "---------------",
+                "Name:                   rpdu2g",
+                "Version:                v2.5.2.5",
+                "",
+                "APC OS(AOS)",
+                "---------------",
+                "Name:                   aos",
+                "Version:                v2.5.3.2",
+            ])
         if command == "prodinfo":
             # Key/value layout as documented by AVI-SPL's APC PDU driver (observed on an AP7920B).
             return "\n".join([
@@ -371,6 +417,38 @@ class ApcCliEngine:
                 for ch in channels:
                     self.outlet_states[ch] = 1 if command == "olon" else 0
             return "E000: Success"
+        return "E101: Command Not Found"
+
+    def _execute_rpdu(self, command: str, arg: str) -> str:
+        """1st gen (rpdu) dialect: ver / status / on / off, success marked by a bare "OK".
+        Formats follow AVI-SPL's driver; the exact error code for a bad outlet number
+        on this generation is not documented, so E100 is an assumption."""
+        if command == "ver":
+            return "\n".join([
+                "OK",
+                "APC OS v2.7.0",
+                "Switched Rack PDU v2.7.3",
+                f"Model: {part_number(self.model_name, 'AP7900')}",
+                f"Outlets: {self.channel_count}",
+                "Max Current: 12A",
+                "Input Type: single-phase",
+            ])
+        if command in ("on", "off", "status"):
+            try:
+                channels = parse_channels(arg, channel_count=self.channel_count) if arg else []
+            except ValueError:
+                channels = []
+            if not channels:
+                return "E100: Command failed"
+            if command == "status":
+                return "\n".join(["OK"] + [f"{ch}:{'ON' if self.outlet_states.get(ch, 1) == 1 else 'OFF'}:Outlet {ch}"
+                                            for ch in channels])
+            if self.fault == "command_error":
+                return "E100: Command failed"
+            if self.fault != "stuck_outlet":
+                for ch in channels:
+                    self.outlet_states[ch] = 1 if command == "on" else 0
+            return "OK"
         return "E101: Command Not Found"
 
 
@@ -506,7 +584,7 @@ class _ApcSshServer:
                 self._transports.remove(transport)
 
     def _run_shell(self, chan, engine: "ApcCliEngine"):
-        chan.sendall((engine.banner() + APC_PROMPT).encode())
+        chan.sendall((engine.banner() + engine.prompt).encode())
         if self._fault == "timeout":
             # Swallow everything and never answer, until the client gives up or the mock stops.
             chan.settimeout(0.2)
@@ -541,7 +619,7 @@ class _ApcSshServer:
                         return
                     if output:
                         chan.sendall((output.replace("\n", "\r\n") + "\r\n").encode())
-                    chan.sendall(APC_PROMPT.encode())
+                    chan.sendall(engine.prompt.encode())
                 elif ch in "\x08\x7f":
                     if line:
                         line = line[:-1]
@@ -549,6 +627,131 @@ class _ApcSshServer:
                 else:
                     line += ch
                     chan.sendall(ch.encode())  # terminal echo, as the real CLI does
+
+
+# ---------------------------------------------------------------------------
+# SNMP agent (APC PowerNet-MIB / Raritan PDU2-MIB outlet objects)
+# ---------------------------------------------------------------------------
+
+class _SnmpAgent:
+    """
+    UDP SNMP v1/v2c agent exposing one PDU profile's model, outlet count and
+    outlet state/control OIDs. Like a real agent it drops requests with an
+    unknown community (reads accept read or write community, writes only the
+    write community). Same serve_forever/shutdown/server_close/server_port
+    surface as HTTPServer so MockPduServer can drive it.
+    """
+
+    def __init__(self, address, profile, model: str, channel_count: int, outlet_states: Dict[int, int],
+                 read_community: str = "public", write_community: str = "private", fault: Optional[str] = None):
+        from equipment_drivers import snmp
+        self._snmp = snmp
+        self.profile = profile
+        self.model = model
+        self.channel_count = channel_count
+        self.outlet_states = outlet_states
+        self.read_community, self.write_community = read_community, write_community
+        self.fault = fault
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._sock.bind(address)
+        self.server_port = self._sock.getsockname()[1]
+        self._stopping = threading.Event()
+
+    def serve_forever(self, poll_interval: float = 0.2):
+        self._sock.settimeout(poll_interval)
+        while not self._stopping.is_set():
+            try:
+                data, addr = self._sock.recvfrom(65535)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            reply = self._handle(data)
+            if reply is not None:
+                self._sock.sendto(reply, addr)
+
+    def shutdown(self):
+        self._stopping.set()
+
+    def server_close(self):
+        self._sock.close()
+
+    def _handle(self, data: bytes) -> Optional[bytes]:
+        snmp = self._snmp
+        try:
+            version, community, pdu_type, request_id, _s, _i, varbinds = snmp.decode_message(data)
+        except (ValueError, IndexError):
+            return None
+        if self.fault == "auth_fail":
+            return None  # as if every community were wrong
+        allowed = (self.write_community,) if pdu_type == snmp.SET else (self.read_community, self.write_community)
+        if community not in allowed or not varbinds:
+            return None  # SNMP v1/v2c agents silently drop bad communities
+        # "timeout"/"drop": the agent stops answering outlet reads and writes; identity
+        # queries (including other MIB branches a driver probes) still get answers.
+        outlet_prefixes = (self.profile.control_oid + ".", self.profile.state_oid + ".")
+        if self.fault in ("timeout", "drop") and any(oid.startswith(outlet_prefixes) for oid, _ in varbinds):
+            return None
+
+        # Every varbind is answered; on an error the agent returns the request's varbinds
+        # unchanged with error-index pointing at the first failing one (RFC 1157/3416).
+        results, status, index = [], 0, 0
+        for position, (oid, value) in enumerate(varbinds, start=1):
+            if pdu_type == snmp.GET:
+                result = self._get(oid)
+                if isinstance(result, snmp.NoSuchObject) and version == 0:
+                    status, index = 2, position  # v1: noSuchName
+                    break
+            elif pdu_type == snmp.SET:
+                error, result = self._set(oid, value, version)
+                if error:
+                    status, index = error, position
+                    break
+            else:
+                status, index = 5, position  # genErr for unsupported PDU types
+                break
+            results.append((oid, result))
+        if status:
+            results = varbinds
+        return snmp.encode_message(version, community, snmp.GET_RESPONSE, request_id, results,
+                                   error_status=status, error_index=index)
+
+    def _outlet(self, oid: str, base: str) -> Optional[int]:
+        prefix = base + "."
+        if oid.startswith(prefix) and oid[len(prefix):].isdigit():
+            channel = int(oid[len(prefix):])
+            if 1 <= channel <= self.channel_count:
+                return channel
+        return None
+
+    def _get(self, oid: str):
+        if oid == self.profile.model_oid:
+            return self.model
+        if oid == self.profile.outlet_count_oid:
+            return self.channel_count
+        channel = self._outlet(oid, self.profile.state_oid)
+        if channel is not None:
+            on = self.outlet_states.get(channel, 1) == 1
+            return self.profile.read_on if on else self.profile.read_off
+        channel = self._outlet(oid, self.profile.control_oid)
+        if channel is not None:  # Raritan's control object; reading it is allowed
+            return self.profile.write_on if self.outlet_states.get(channel, 1) == 1 else self.profile.write_off
+        return self._snmp.NO_SUCH_OBJECT
+
+    def _set(self, oid: str, value, version: int):
+        """Returns (error_status, value)."""
+        channel = self._outlet(oid, self.profile.control_oid)
+        if channel is None:
+            # v1 has no notWritable; it reports noSuchName for anything it won't set
+            return (17 if version else 2), value
+        if value not in (self.profile.write_on, self.profile.write_off):
+            return (10 if version else 3), value  # wrongValue / v1 badValue
+        if self.fault == "command_error":
+            return (14 if version else 5), value  # commitFailed / v1 genErr
+        if self.fault != "stuck_outlet":
+            self.outlet_states[channel] = 1 if value == self.profile.write_on else 0
+        return 0, value
+
 
 
 class MockPduServer:
@@ -559,7 +762,9 @@ class MockPduServer:
     def __init__(self, vendor: str = "apc", channel_count: int = 8, port: int = 0,
                  model_name: str = "", model_signature: str = "", voltage: float = 120.0,
                  username: Optional[str] = None, password: Optional[str] = None, fault: Optional[str] = None,
-                 tls: bool = False):
+                 tls: bool = False, apc_generation: str = "rpdu2g", snmp: bool = False):
+        if apc_generation not in APC_GENERATIONS:
+            raise ValueError(f"Unknown APC firmware generation '{apc_generation}'")
         if fault is not None and fault not in FAULTS:
             raise ValueError(f"Unknown fault '{fault}'. Choose from: {', '.join(FAULTS)}")
         self.vendor = vendor.lower()
@@ -574,6 +779,13 @@ class MockPduServer:
         self.fault = fault
         # HTTPS with a self-signed certificate (WTI/Raritan only; APC is SSH).
         self.tls = tls
+        # APC CLI dialect: "rpdu2g" (2nd gen: olOn/olStatus) or "rpdu" (1st gen: on/status).
+        self.apc_generation = apc_generation
+        # Serve the vendor's SNMP MIB objects over UDP instead of its native protocol
+        # (APC and Raritan; read community "public", write community "private").
+        self.snmp = snmp
+        if snmp and self.vendor not in ("apc", "raritan"):
+            raise ValueError(f"No SNMP mock for vendor '{vendor}' (APC and Raritan only)")
         self._stop_event = threading.Event()
         self.server = None
         self.thread: Optional[threading.Thread] = None
@@ -591,10 +803,19 @@ class MockPduServer:
     def start(self):
         self.outlet_states = {ch: 1 for ch in range(1, self.channel_count + 1)}
 
-        if self.vendor == "apc":
+        if self.snmp:
+            from equipment_drivers.pdu.snmp_drivers import APC_RPDU, APC_RPDU2, RARITAN_PDU2
+            profile = {"raritan": RARITAN_PDU2,
+                       "apc": APC_RPDU if self.apc_generation == "rpdu" else APC_RPDU2}[self.vendor]
+            default_model = "PX3-5460" if self.vendor == "raritan" else "AP7900"
+            self.server = _SnmpAgent((self.host, self.requested_port), profile,
+                                     part_number(self.model_name, default_model), self.channel_count,
+                                     self.outlet_states, fault=self.fault)
+        elif self.vendor == "apc":
             self.server = _ApcSshServer(
                 (self.host, self.requested_port),
-                lambda: ApcCliEngine(self.model_name, self.channel_count, self.outlet_states, fault=self.fault),
+                lambda: ApcCliEngine(self.model_name, self.channel_count, self.outlet_states, fault=self.fault,
+                                     generation=self.apc_generation),
                 username=self.username, password=self.password, fault=self.fault)
         else:
             class CustomHandler(MockEquipmentHandler):

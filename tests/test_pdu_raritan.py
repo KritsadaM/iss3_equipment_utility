@@ -36,7 +36,8 @@ class TestRaritanDrivers(unittest.TestCase):
     def test_sample_channel_counts(self):
         self.assertEqual(RARITAN_MODELS['raritan_px2_5190r']().get_max_channel(), 8)
         self.assertEqual(RARITAN_MODELS['raritan_px2_5440']().get_max_channel(), 20)
-        self.assertEqual(RARITAN_MODELS['raritan_px2_5460']().get_max_channel(), 30)
+        self.assertEqual(RARITAN_MODELS['raritan_px2_5460']().get_max_channel(), 30)  # unverified
+        self.assertEqual(RARITAN_MODELS['raritan_px3_5460']().get_max_channel(), 20)  # (20) C13
         self.assertEqual(RARITAN_MODELS['raritan_px2_5804']().get_max_channel(), 42)
         self.assertEqual(RARITAN_MODELS['raritan_px3_5724']().get_max_channel(), 36)
         self.assertEqual(RARITAN_MODELS['raritan_px3_5904']().get_max_channel(), 54)
