@@ -4,6 +4,7 @@ PDU control CLI shared by iss_pdu_utility (official) and iss_pdu_utility_eng
 simulator; Buy-off mode is available in either wherever simulator.py is installed.
 """
 import argparse
+import contextlib
 import logging
 import os
 import sys
@@ -13,6 +14,7 @@ from equipment_drivers.discovery import discover_and_instantiate
 from equipment_drivers.registry import registry
 from equipment_drivers.channel_spec import parse_channels
 from equipment_drivers.exceptions import EquipmentConnectionError
+from equipment_drivers.capture import CaptureSession
 
 try:
     # simulator.py is stripped from the official package (see Makefile).
@@ -121,6 +123,10 @@ def main(argv=None, engineering: bool = False):
     parser.add_argument("--password", default=None,
                         help="Password override for the PDU (falls back to PDU_PASSWORD env var, then driver default). "
                              "Prefer the env var over this flag to avoid the password showing up in shell history.")
+    parser.add_argument("--capture", metavar="DIR", default=None,
+                        help="Record every request/response exchanged with the PDU (identification included) "
+                             "under DIR, one file per reply, for turning real-device output into test fixtures. "
+                             "Credentials are not recorded.")
     parser.add_argument("action", choices=["on", "off", "status"], help="Action to perform")
     parser.add_argument("channel", type=str,
                         help="Channel spec: a single channel (3), a comma-separated list (3,4,5 or "
@@ -144,6 +150,19 @@ def main(argv=None, engineering: bool = False):
     username = args.username or os.environ.get("PDU_USERNAME")
     password = args.password or os.environ.get("PDU_PASSWORD")
 
+    capture = None
+    if args.capture:
+        label = "buyoff-" + (args.model or args.ip_address or "default") if args.buyoff else args.ip_address
+        capture = CaptureSession(args.capture, label=label)
+    try:
+        with capture or contextlib.nullcontext():
+            _run(args, username, password)
+    finally:
+        if capture is not None and capture.count:
+            print(f"Captured {capture.count} exchange(s) to {capture.path}")
+
+
+def _run(args, username, password):
     sig, driver_cls, display_ip, display_port = resolve_pdu_driver(
         args.model, args.ip_address, args.port, args.buyoff, username=username, password=password
     )

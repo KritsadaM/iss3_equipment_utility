@@ -3,8 +3,9 @@
 Sample PDU responses used by the driver unit tests. None were captured by us from real
 hardware (no units were available); each comes from vendor-published material or from
 other open-source projects that captured it from real units.
-When a real unit becomes available, replace these with captured output and re-run the
-tests. That is the real check that the drivers match the hardware.
+When a real unit becomes available, run `iss_pdu_utility ... --capture DIR` against it,
+copy the reply files over these, and re-run the tests. That is the real check that the
+drivers match the hardware.
 
 | File | Origin | Verbatim? |
 |---|---|---|

@@ -141,6 +141,18 @@ response = driver.turn_on(3)
 # response.success, response.action, response.channel, response.raw, response.status, response.model
 ```
 
+### Capturing real device output
+
+Add `--capture DIR` to any real-device run. It records every exchange with the PDU, including the identification step, into `DIR/<timestamp>-<ip>/`:
+- `exchanges.jsonl`: the request, HTTP status, timing and errors for each exchange.
+- `NNN-<what>.json|.txt`: each reply exactly as the device sent it.
+
+```bash
+PDU_PASSWORD=... iss_pdu_utility --ip_address 192.168.1.40 --capture captures status all
+```
+
+Passwords, `Authorization` headers and `user:pass@` in URLs are never recorded. The reply files can be copied into `tests/fixtures/<vendor>/` in place of the documentation-derived samples, so the tests check the drivers against real hardware.
+
 ### Mock / engineering tools
 
 Without hardware, the engineering package can simulate every PDU model. APC is served as an SSH CLI, WTI and Raritan as HTTP APIs. The response formats follow vendor documentation, see `tests/fixtures/README.md` for sources.
