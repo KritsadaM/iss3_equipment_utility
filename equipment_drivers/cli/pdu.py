@@ -8,6 +8,7 @@ import contextlib
 import logging
 import os
 import sys
+import time
 
 import equipment_drivers  # noqa: F401 -- triggers driver registration
 from equipment_drivers.discovery import discover_and_instantiate
@@ -25,6 +26,11 @@ except ImportError:
     FAULTS = {}
 
 logger = logging.getLogger("pdu_utility")
+
+# --verify: how many times to read an outlet back after switching it, and how
+# long to wait between reads (PDUs may apply power-on sequencing delays).
+VERIFY_ATTEMPTS = 3
+VERIFY_INTERVAL = 1.0
 
 
 def resolve_pdu_driver(model_arg, ip_arg, port_arg, is_buyoff, username=None, password=None):
@@ -123,6 +129,10 @@ def main(argv=None, engineering: bool = False):
     parser.add_argument("--password", default=None,
                         help="Password override for the PDU (falls back to PDU_PASSWORD env var, then driver default). "
                              "Prefer the env var over this flag to avoid the password showing up in shell history.")
+    parser.add_argument("--verify", action="store_true",
+                        help="After on/off, read each outlet back and fail unless it reports the new state "
+                             f"(up to {VERIFY_ATTEMPTS} reads, {VERIFY_INTERVAL:g}s apart). Catches PDUs that "
+                             "acknowledge a command without switching.")
     parser.add_argument("--capture", metavar="DIR", default=None,
                         help="Record every request/response exchanged with the PDU (identification included) "
                              "under DIR, one file per reply, for turning real-device output into test fixtures. "
@@ -244,6 +254,10 @@ def _run(args, username, password):
                 print(f"Channel {response.channel} turned {verb} successfully.")
             print(f"RAW_OUTPUT:\n{response.raw.strip()}")
 
+            if args.verify and response.action != "get_status":
+                if not verify_outlet(driver, channel, verb):
+                    any_failed = True
+
         if any_failed:
             sys.exit(1)
 
@@ -255,6 +269,24 @@ def _run(args, username, password):
         if mock_server:
             mock_server.stop()
 
+
+
+def verify_outlet(driver, channel: int, expected: str) -> bool:
+    """Read the outlet back until it reports `expected` ('ON'/'OFF'). Prints the
+    outcome and the last readback; returns whether the state was confirmed."""
+    readback = None
+    for attempt in range(1, VERIFY_ATTEMPTS + 1):
+        readback = driver.get_status(channel)
+        if readback.success and readback.status == expected:
+            print(f"Channel {channel} verified {expected}.")
+            print(f"VERIFY_OUTPUT:\n{readback.raw.strip()}")
+            return True
+        if attempt < VERIFY_ATTEMPTS:
+            time.sleep(VERIFY_INTERVAL)
+    logger.error(f"Channel {channel} still reports {readback.status} after {VERIFY_ATTEMPTS} reads; "
+                 f"expected {expected}. The PDU acknowledged the command but the outlet did not switch.")
+    print(f"VERIFY_OUTPUT:\n{readback.raw.strip()}")
+    return False
 
 
 def main_engineering(argv=None):

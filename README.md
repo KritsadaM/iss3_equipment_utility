@@ -181,7 +181,11 @@ iss_mock_server --vendor raritan --fault drop                            # stand
 iss_trial_utility --all --faults                                          # every model x every fault
 ```
 
-`stuck_outlet` is the one fault the utility can't detect by itself: the PDU claims success, so it exits 0. Only reading the state back (`status`) shows the outlet didn't change.
+`stuck_outlet` is the one fault a plain `on`/`off` can't detect: the PDU claims success, so the utility exits 0. Add `--verify` to read each outlet back after switching it. It retries up to 3 reads, 1 s apart, and exits 1 if the outlet never reports the new state:
+
+```bash
+iss_pdu_utility --ip_address 192.168.1.40 --verify off 3
+```
 
 ## Adding a new driver
 

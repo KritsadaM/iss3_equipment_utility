@@ -103,6 +103,20 @@ class TestFaultCli(unittest.TestCase):
         self.assertEqual(res.returncode, 1)
         self.assertIn("Simulating fault 'command_error'", res.stdout)
 
+    def test_verify_catches_stuck_outlet(self):
+        res = self.run_utility("--buyoff", "--model", "raritan_px3_5460", "--fault", "stuck_outlet",
+                               "--verify", "off", "1")
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("Channel 1 turned OFF successfully.", res.stdout)  # what the PDU claimed
+        self.assertIn("still reports ON after 3 reads; expected OFF", res.stderr)
+
+    def test_verify_confirms_a_working_outlet(self):
+        res = self.run_utility("--buyoff", "--model", "apc_ap7900", "--verify", "off", "1-2")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("Channel 1 verified OFF.", res.stdout)
+        self.assertIn("Channel 2 verified OFF.", res.stdout)
+        self.assertIn("VERIFY_OUTPUT:\nE000: Success\n 2: Outlet 2: Off", res.stdout)
+
     def test_fault_requires_buyoff(self):
         res = self.run_utility("--ip_address", "10.0.0.1", "--fault", "drop", "status", "1")
         self.assertEqual(res.returncode, 2)
