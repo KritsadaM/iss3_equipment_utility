@@ -19,7 +19,8 @@ PYTHONPATH=$(pwd) python -m pytest tests/ -v --tb=short
 flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
 flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
 
-# Run a utility from the repo (the iss_* scripts are extension-less Python executables at repo root)
+# Run a utility from the repo (root iss_* scripts are thin wrappers around equipment_drivers/cli/*.py;
+# after `pip install -e .` the same tools exist as iss-pdu-utility, iss-pdu-utility-eng, iss-trial-utility, iss-mock-server)
 PYTHONPATH=$(pwd) ./iss_pdu_utility --ip_address 192.168.1.40 --port 80 status 1-4
 PYTHONPATH=$(pwd) ./iss_pdu_utility_eng --mock --model wti_vmr_hd4d20 status all   # no hardware needed
 PYTHONPATH=$(pwd) ./iss_trial_utility --list          # list all model signatures
@@ -32,7 +33,7 @@ make deb-engineering      # engineering .deb (adds mock/trial tools + simulator.
 make proto                # regenerate protobuf stubs (needs grpcio-tools)
 ```
 
-PDU `--port` defaults to `None`, so each driver falls back to its `DEFAULT_PORT` (APC 22, WTI/Raritan 80). The `[project.scripts]` entries in `pyproject.toml` point at `equipment_drivers.cli.*`, which does not exist — the real entry points are the root-level `iss_*` scripts.
+PDU `--port` defaults to `None`, so each driver falls back to its `DEFAULT_PORT` (APC 22, WTI/Raritan 80).
 
 ## Architecture
 
@@ -53,7 +54,7 @@ Tests that use LAN-looking IPs must pass `identify=False`, or they will try to r
 
 **Driver contract** (`interfaces.py`): `connect()` takes optional `username`/`password` and drivers fall back to their own defaults when `None`. PDU actions return a `PDUResponse` dataclass (`responses.py`); `TerminalServerDriver`/`DAQDriver` still return plain tuples. PDU drivers must call `self.validate_channel()` before acting, and raise the exceptions in `exceptions.py` (`EquipmentConnectionError`, `EquipmentCommandError`, `EquipmentNotConnectedError`). Channel specs (`3`, `1,3-5`, `all`) are parsed by `channel_spec.parse_channels`, with `all` expanded via `driver.get_max_channel()`.
 
-**Official vs. engineering builds.** `simulator.py` (`MockPduServer`: a paramiko SSH server running `ApcCliEngine` for APC, an `HTTPServer` for WTI/Raritan; plus the trial runners) is stripped from the official `.deb`. `iss_pdu_utility` guards its simulator import with `HAS_MOCK`; `iss_pdu_utility_eng` imports it unconditionally. These two scripts are near-duplicates, so mirror changes between them. Official code must not hard-depend on `simulator.py`. If you change driver HTTP endpoints or payloads, update the matching mock handler in `simulator.py` and the endpoint table in `iss_mock_server`. `MockPduServer(fault=...)` simulates the failures listed in `simulator.FAULTS`. `run_pdu_fault_trial` (`iss_trial_utility --faults`) checks that drivers turn each one into an `EquipmentError` or `success=False`. A new driver should pass it.
+**Official vs. engineering builds.** `simulator.py` (`MockPduServer`: a paramiko SSH server running `ApcCliEngine` for APC, an `HTTPServer` for WTI/Raritan; plus the trial runners) is stripped from the official `.deb`. Both PDU utilities run `equipment_drivers/cli/pdu.py` (`main` / `main_engineering`), which guards the simulator import with `HAS_MOCK`. `cli/trial.py` and `cli/mock_server.py` are removed from the official package along with `simulator.py`. Official code must not hard-depend on `simulator.py`. Against a real address, the PDU CLI refuses the dummy-driver fallback rather than reporting fake success. If you change driver HTTP endpoints or payloads, update the matching mock handler in `simulator.py` and the endpoint table in `cli/mock_server.py`. `MockPduServer(fault=...)` simulates the failures listed in `simulator.FAULTS`. `run_pdu_fault_trial` (`iss_trial_utility --faults`) checks that drivers turn each one into an `EquipmentError` or `success=False`. A new driver should pass it.
 
 **Protobuf** (`proto/equipment/v1/equipment.proto`) is the source of truth; the generated `equipment_drivers/pb/**/equipment_pb2.py(i)` stubs are committed. `proto_convert.py` is the only module that should import protobuf — keep it out of drivers and `interfaces.py`. See `docs/protobuf-migration.md`; it isn't wired into the CLIs yet.
 

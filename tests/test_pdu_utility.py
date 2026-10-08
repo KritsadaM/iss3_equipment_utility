@@ -22,6 +22,16 @@ class TestPduUtility(unittest.TestCase):
         self.assertNotEqual(res.returncode, 0)
         self.assertIn("--ip_address (unless in Buy-off mode)", res.stderr)
 
+    def test_unreachable_pdu_is_an_error_not_a_dummy_success(self):
+        import socket
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            closed_port = s.getsockname()[1]
+        res = self.run_utility(["--ip_address", "127.0.0.1", "--port", str(closed_port), "status", "1"])
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("No PDU answered at 127.0.0.1", res.stderr)
+        self.assertNotIn("Status:", res.stdout)
+
     def test_buyoff_default_apc(self):
         res = self.run_utility(["--buyoff", "status", "1"])
         self.assertEqual(res.returncode, 0, msg=f"Failed with stderr: {res.stderr}")

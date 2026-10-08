@@ -22,6 +22,7 @@ dev = [
 
 [project.scripts]
 iss-pdu-utility = "equipment_drivers.cli.pdu:main"
+iss-pdu-utility-eng = "equipment_drivers.cli.pdu:main_engineering"
 iss-trial-utility = "equipment_drivers.cli.trial:main"
 iss-mock-server = "equipment_drivers.cli.mock_server:main"
 

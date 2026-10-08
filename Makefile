@@ -26,8 +26,10 @@ deb: clean
 
 	# Copy official source files
 	cp -r equipment_drivers $(BUILD_DIR)/opt/$(PKG_NAME)/
-	# Remove simulator from official package — engineering only
+	# Remove simulator and the CLIs built on it from official package — engineering only
 	rm -f $(BUILD_DIR)/opt/$(PKG_NAME)/equipment_drivers/simulator.py
+	rm -f $(BUILD_DIR)/opt/$(PKG_NAME)/equipment_drivers/cli/trial.py
+	rm -f $(BUILD_DIR)/opt/$(PKG_NAME)/equipment_drivers/cli/mock_server.py
 
 	cp iss_pdu_utility     $(BUILD_DIR)/opt/$(PKG_NAME)/
 	cp iss_terminal_utility $(BUILD_DIR)/opt/$(PKG_NAME)/
