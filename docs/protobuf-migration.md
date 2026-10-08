@@ -50,8 +50,13 @@ Drop these into the repo root, preserving paths.
 Add to `requirements.txt`:
 
 ```
-protobuf>=5,<6
+protobuf>=7.35.1,<8
 ```
+
+The protobuf runtime must be at least the version that generated the committed
+stubs (see the `Protobuf Python Version` line at the top of `equipment_pb2.py`),
+or importing them fails with a `VersionError`. Raise this pin whenever `make proto`
+is rerun with a newer `grpcio-tools`.
 
 Add to a dev/build-only requirements file (or install ad hoc when
 regenerating stubs — this isn't needed at runtime):

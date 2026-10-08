@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import zlib
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Dict, Optional, Type
@@ -46,6 +47,11 @@ FAULTS = {
 }
 # How long a "timeout" fault holds a request open (released early when the mock stops).
 FAULT_HANG_SECONDS = 30
+
+
+def _stable_number(text: str) -> int:
+    """Deterministic stand-in for a serial number (hash() is randomized per process)."""
+    return zlib.crc32(text.encode())
 
 
 def part_number(model_name: str, default: str) -> str:
@@ -223,7 +229,7 @@ class MockEquipmentHandler(BaseHTTPRequestHandler):
             "totalports": "0",
             "totalplugs": str(self.channel_count),
             "softwareversion": "6.60 19 Feb 2020",
-            "serialnumber": f"{abs(hash(product)) % 10**14:014d}",
+            "serialnumber": f"{_stable_number(product) % 10**14:014d}",
             "assettag": "",
             "siteid": "",
         }
@@ -249,7 +255,7 @@ class MockEquipmentHandler(BaseHTTPRequestHandler):
                 "brand": "",
                 "model": model,
                 "partNumber": "",
-                "serialNumber": f"R{abs(hash(model)) % 10**10:010d}",
+                "serialNumber": f"R{_stable_number(model) % 10**10:010d}",
                 "rating": {
                     "voltage": "200-240V" if self.voltage > 120 else "100-120V",
                     "current": "30A",

@@ -157,6 +157,24 @@ response = driver.turn_on(3)
 # response.success, response.action, response.channel, response.raw, response.status, response.model
 ```
 
+### Machine-readable output
+
+`--json` prints one JSON document instead of the text lines:
+- `model`, `ip_address`, `port`
+- `raw_connection`
+- `results`: one entry per channel, with `success`, `status`, `raw`, and `verify` when `--verify` is used
+- `errors`: every ERROR log line from the run
+- `success`
+
+It always prints the document, even when no PDU answers, so scripts don't have to scrape the text output.
+
+`--event-dir DIR` writes one protobuf `EquipmentEvent` (`proto/equipment/v1/equipment.proto`) per channel result as `DIR/<event_id>.pb`, taking `station_id` from `$STATION_ID`. It needs the `protobuf` package (`pip install '.[events]'`).
+
+```bash
+iss_pdu_utility --ip_address 192.168.1.40 --json status all | jq '.results[] | {channel, status}'
+STATION_ID=PPTR-V2-004 iss_pdu_utility --ip_address 192.168.1.40 --event-dir /var/spool/iss3-events off 3
+```
+
 ### Capturing real device output
 
 Add `--capture DIR` to any real-device run. It records every exchange with the PDU, including the identification step, into `DIR/<timestamp>-<ip>/`:

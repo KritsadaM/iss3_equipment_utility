@@ -14,10 +14,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# --event-dir (protobuf EquipmentEvent output)
+events = [
+    "protobuf>=7.35.1,<8",
+]
 dev = [
     "flake8",
     "pytest",
     "pytest-cov",
+    "protobuf>=7.35.1,<8",
 ]
 
 [project.scripts]
