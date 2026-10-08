@@ -13,7 +13,7 @@ import sys
 import time
 
 import equipment_drivers  # noqa: F401 -- triggers driver registration
-from equipment_drivers.simulator import MockPduServer, FAULTS
+from equipment_drivers.simulator import APC_GENERATIONS, FAULTS, MockPduServer
 
 BOLD = "\033[1m"
 CYAN = "\033[96m"
@@ -25,8 +25,9 @@ SUPPORTED_VENDORS = ["apc", "wti", "raritan"]
 
 VENDOR_ENDPOINTS = {
     "apc": [
-        ("SSH", "olStatus <ch|all>",                 "Outlet status, e.g. 'E000: Success' + ' 1: Outlet 1: On'"),
-        ("SSH", "olOn <ch> / olOff <ch>",            "Switch outlet(s); <ch> may be 3, 1,3 or 1-4"),
+        ("SSH", "olStatus <ch|all>",                 "2nd gen: 'E000: Success' + ' 1: Outlet 1: On'"),
+        ("SSH", "olOn <ch> / olOff <ch>",            "2nd gen: switch outlet(s); <ch> may be 3, 1,3 or 1-4"),
+        ("SSH", "status / on / off <ch>",            "1st gen (--apc-generation rpdu): 'OK' + '1:ON:Outlet 1'"),
     ],
     "wti": [
         ("GET",  "/api/v2/status/status",            "Unit identity (vendor, product, totalplugs)"),
@@ -88,6 +89,9 @@ def main(argv=None):
         "--channels", type=int, default=None,
         help="Number of simulated outlets/channels (default: vendor-specific default)")
     parser.add_argument(
+        "--apc-generation", choices=APC_GENERATIONS, default="rpdu2g",
+        help="APC firmware CLI dialect: rpdu2g (2nd gen: olOn/olStatus, default) or rpdu (1st gen: on/status)")
+    parser.add_argument(
         "--fault", choices=sorted(FAULTS), default=None,
         help="Make the PDU misbehave: " + "; ".join(f"{k} = {v}" for k, v in FAULTS.items()))
     args = parser.parse_args(argv)
@@ -97,7 +101,8 @@ def main(argv=None):
     channels = args.channels or default_channels.get(args.vendor, 8)
 
     port = args.port if args.port is not None else (2222 if args.vendor == "apc" else 8080)
-    server = MockPduServer(vendor=args.vendor, channel_count=channels, port=port, fault=args.fault)
+    server = MockPduServer(vendor=args.vendor, channel_count=channels, port=port, fault=args.fault,
+                           apc_generation=args.apc_generation)
 
     def shutdown(sig, frame):
         print(f"\n{BOLD}Shutting down mock server...{RESET}")

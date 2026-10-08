@@ -298,7 +298,7 @@ def _jsonrpc_error(req_id, code: int, message: str) -> dict:
 # APC NMC CLI simulator (served over SSH, like the real Network Management Card)
 # ---------------------------------------------------------------------------
 
-APC_PROMPT = "apc>"
+APC_GENERATIONS = ("rpdu2g", "rpdu")
 
 
 class ApcCliEngine:
@@ -306,13 +306,31 @@ class ApcCliEngine:
     returns the text the real CLI would print (without the trailing prompt)."""
 
     def __init__(self, model_name: str, channel_count: int, outlet_states: Dict[int, int],
-                 fault: Optional[str] = None):
+                 fault: Optional[str] = None, generation: str = "rpdu2g"):
+        if generation not in APC_GENERATIONS:
+            raise ValueError(f"Unknown APC firmware generation '{generation}'. Choose from: {', '.join(APC_GENERATIONS)}")
         self.model_name = model_name or "APC Switched Rack PDU"
         self.channel_count = channel_count
         self.outlet_states = outlet_states
         self.fault = fault
+        self.generation = generation
+
+    @property
+    def prompt(self) -> str:
+        # 1st gen firmware prompts "APC>", 2nd gen "apc>" (per AVI-SPL's driver).
+        return "APC>" if self.generation == "rpdu" else "apc>"
 
     def banner(self) -> str:
+        if self.generation == "rpdu":
+            # Assumed layout: the AOS banner of a 1st gen (rpdu) unit has not been seen
+            # verbatim; firmware versions are the ones AVI-SPL documents for `ver`.
+            return (
+                "\r\n"
+                "American Power Conversion               Network Management Card AOS      v2.7.0\r\n"
+                "(c) Copyright 2004 All Rights Reserved  Switched Rack PDU APP            v2.7.3\r\n"
+                "-------------------------------------------------------------------------------\r\n"
+                "\r\n"
+            )
         # Layout copied from a Schneider/APC rack PDU login captured in
         # openbmc-test-automation (lib/pdu/schneider.robot); only the date and time vary.
         now = datetime.now()
@@ -342,6 +360,34 @@ class ApcCliEngine:
 
         if command in ("exit", "quit", "bye"):
             return None
+        if self.generation == "rpdu":
+            return self._execute_rpdu(command, arg)
+        if command == "about":
+            # Verbatim from AVI-SPL's driver tests (an AP7920B), with the model substituted.
+            return "\n".join([
+                "E000: Success",
+                "Hardware Factory",
+                "---------------",
+                f"Model Number:           {part_number(self.model_name, 'AP7900')}",
+                "Serial Number:          2A2548L01451",
+                "Hardware Revision:      B3",
+                "Manufacture Date:       11/25/2025",
+                "",
+                "Network Management Card",
+                "---------------",
+                "Model Number:           0N-1570-07K",
+                "Serial Number:          2A2547L16570",
+                "",
+                "Application Module",
+                "---------------",
+                "Name:                   rpdu2g",
+                "Version:                v2.5.2.5",
+                "",
+                "APC OS(AOS)",
+                "---------------",
+                "Name:                   aos",
+                "Version:                v2.5.3.2",
+            ])
         if command == "prodinfo":
             # Key/value layout as documented by AVI-SPL's APC PDU driver (observed on an AP7920B).
             return "\n".join([
@@ -371,6 +417,38 @@ class ApcCliEngine:
                 for ch in channels:
                     self.outlet_states[ch] = 1 if command == "olon" else 0
             return "E000: Success"
+        return "E101: Command Not Found"
+
+    def _execute_rpdu(self, command: str, arg: str) -> str:
+        """1st gen (rpdu) dialect: ver / status / on / off, success marked by a bare "OK".
+        Formats follow AVI-SPL's driver; the exact error code for a bad outlet number
+        on this generation is not documented, so E100 is an assumption."""
+        if command == "ver":
+            return "\n".join([
+                "OK",
+                "APC OS v2.7.0",
+                "Switched Rack PDU v2.7.3",
+                f"Model: {part_number(self.model_name, 'AP7900')}",
+                f"Outlets: {self.channel_count}",
+                "Max Current: 12A",
+                "Input Type: single-phase",
+            ])
+        if command in ("on", "off", "status"):
+            try:
+                channels = parse_channels(arg, channel_count=self.channel_count) if arg else []
+            except ValueError:
+                channels = []
+            if not channels:
+                return "E100: Command failed"
+            if command == "status":
+                return "\n".join(["OK"] + [f"{ch}:{'ON' if self.outlet_states.get(ch, 1) == 1 else 'OFF'}:Outlet {ch}"
+                                            for ch in channels])
+            if self.fault == "command_error":
+                return "E100: Command failed"
+            if self.fault != "stuck_outlet":
+                for ch in channels:
+                    self.outlet_states[ch] = 1 if command == "on" else 0
+            return "OK"
         return "E101: Command Not Found"
 
 
@@ -506,7 +584,7 @@ class _ApcSshServer:
                 self._transports.remove(transport)
 
     def _run_shell(self, chan, engine: "ApcCliEngine"):
-        chan.sendall((engine.banner() + APC_PROMPT).encode())
+        chan.sendall((engine.banner() + engine.prompt).encode())
         if self._fault == "timeout":
             # Swallow everything and never answer, until the client gives up or the mock stops.
             chan.settimeout(0.2)
@@ -541,7 +619,7 @@ class _ApcSshServer:
                         return
                     if output:
                         chan.sendall((output.replace("\n", "\r\n") + "\r\n").encode())
-                    chan.sendall(APC_PROMPT.encode())
+                    chan.sendall(engine.prompt.encode())
                 elif ch in "\x08\x7f":
                     if line:
                         line = line[:-1]
@@ -559,7 +637,9 @@ class MockPduServer:
     def __init__(self, vendor: str = "apc", channel_count: int = 8, port: int = 0,
                  model_name: str = "", model_signature: str = "", voltage: float = 120.0,
                  username: Optional[str] = None, password: Optional[str] = None, fault: Optional[str] = None,
-                 tls: bool = False):
+                 tls: bool = False, apc_generation: str = "rpdu2g"):
+        if apc_generation not in APC_GENERATIONS:
+            raise ValueError(f"Unknown APC firmware generation '{apc_generation}'")
         if fault is not None and fault not in FAULTS:
             raise ValueError(f"Unknown fault '{fault}'. Choose from: {', '.join(FAULTS)}")
         self.vendor = vendor.lower()
@@ -574,6 +654,8 @@ class MockPduServer:
         self.fault = fault
         # HTTPS with a self-signed certificate (WTI/Raritan only; APC is SSH).
         self.tls = tls
+        # APC CLI dialect: "rpdu2g" (2nd gen: olOn/olStatus) or "rpdu" (1st gen: on/status).
+        self.apc_generation = apc_generation
         self._stop_event = threading.Event()
         self.server = None
         self.thread: Optional[threading.Thread] = None
@@ -594,7 +676,8 @@ class MockPduServer:
         if self.vendor == "apc":
             self.server = _ApcSshServer(
                 (self.host, self.requested_port),
-                lambda: ApcCliEngine(self.model_name, self.channel_count, self.outlet_states, fault=self.fault),
+                lambda: ApcCliEngine(self.model_name, self.channel_count, self.outlet_states, fault=self.fault,
+                                     generation=self.apc_generation),
                 username=self.username, password=self.password, fault=self.fault)
         else:
             class CustomHandler(MockEquipmentHandler):

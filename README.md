@@ -32,7 +32,7 @@ iss_pdu_utility --ip_address 192.168.1.40 --port 80 status 3
 
 | Vendor | Protocol | Default port | `RAW_OUTPUT` is |
 |---|---|---|---|
-| APC | NMC command line over SSH (`olOn` / `olOff` / `olStatus`) | 22 | CLI text, e.g. `E000: Success` / ` 3: Outlet 3: On` |
+| APC | NMC command line over SSH. 2nd gen firmware: `olOn` / `olOff` / `olStatus`. 1st gen: `on` / `off` / `status`. Detected automatically. | 22 | CLI text, e.g. `E000: Success` / ` 3: Outlet 3: On`, or `OK` / `3:ON:Outlet 3` on 1st gen |
 | WTI | REST API (`/api/v2/config/powerplug`) | 80 (HTTPS on 443) | JSON from the PDU |
 | Raritan | Xerus JSON-RPC (`/model/pdu/0/outlet/<n>`) | 80 (HTTPS on 443) | JSON-RPC response from the PDU |
 

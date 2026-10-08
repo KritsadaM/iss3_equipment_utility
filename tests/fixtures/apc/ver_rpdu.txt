@@ -1,0 +1,6 @@
+APC OS v2.7.0
+Switched Rack PDU v2.7.3
+Model: AP7900
+Outlets: 8
+Max Current: 12A
+Input Type: single-phase

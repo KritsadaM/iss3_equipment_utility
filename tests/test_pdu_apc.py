@@ -1,6 +1,7 @@
 import os
 import unittest
-from equipment_drivers.pdu.apc_models import (APC_MODELS, ApcAp7900Driver, ApcAp8959Driver,
+from equipment_drivers.pdu.apc_models import (APC_MODELS, RPDU, RPDU2G, ApcAp7900Driver, ApcAp8959Driver,
+                                              command_succeeded, detect_dialect, parse_model,
                                               parse_result_code, parse_outlet_states)
 from equipment_drivers.exceptions import EquipmentConnectionError, EquipmentNotConnectedError
 from equipment_drivers.simulator import MockPduServer
@@ -33,7 +34,9 @@ class FakeCliTransport:
 
 
 def connected_driver(driver_cls, replies):
+    """A driver on a fake 2nd gen session unless `replies` answers `about` itself."""
     driver = driver_cls()
+    replies.setdefault("about", fixture("about_rpdu2g.txt"))
     transport = FakeCliTransport(replies)
     driver.transport_factory = lambda: transport
     driver.connect("192.168.1.50")
@@ -164,6 +167,73 @@ class TestApcDriver(unittest.TestCase):
         driver_8959._device_channel_count = 24
         with self.assertRaises(ValueError):
             driver_8959.turn_on(25)
+
+
+class TestFirstGenerationDialect(unittest.TestCase):
+    """1st gen (rpdu) firmware: on/off/status/ver, "OK" for success, "3:ON:name" status lines."""
+
+    def gen1_driver(self, extra):
+        replies = {"about": "E101: Command Not Found", "ver": fixture("ver_rpdu.txt"), **extra}
+        return connected_driver(ApcAp7900Driver, replies)
+
+    def test_dialect_detection(self):
+        self.assertIs(detect_dialect(fixture("about_rpdu2g.txt")), RPDU2G)
+        self.assertIs(detect_dialect("E101: Command Not Found"), RPDU)
+        self.assertIs(detect_dialect("Application Module\nName: rpdu\n"), RPDU)
+
+    def test_success_markers(self):
+        self.assertTrue(command_succeeded("OK"))
+        self.assertTrue(command_succeeded("E000: Success"))
+        self.assertFalse(command_succeeded("E102: Parameter Error"))
+        self.assertFalse(command_succeeded("garbage"))
+
+    def test_status_lines_are_number_state_name(self):
+        states = parse_outlet_states(fixture("status_rpdu.txt"), RPDU)
+        self.assertEqual(states, {1: "ON", 2: "OFF"})
+        self.assertEqual(parse_outlet_states(fixture("status_rpdu.txt"), RPDU2G), {})  # never read positionally
+
+    def test_ver_reports_model(self):
+        self.assertEqual(parse_model(fixture("ver_rpdu.txt")), "AP7900")
+
+    def test_commands_and_outlet_count(self):
+        driver, transport = self.gen1_driver({"on 2": "OK", "status 2": "OK\n2:OFF:Rack Fan"})
+        self.assertTrue(driver.turn_on(2).success)
+        status = driver.get_status(2)
+        self.assertEqual((status.success, status.status), (True, "OFF"))
+        self.assertEqual(transport.sent, ["about", "ver", "on 2", "status 2"])  # count from `ver`, not olStatus
+        self.assertEqual(driver.dialect, RPDU)
+
+    def test_error_code_fails_the_action(self):
+        driver, _ = self.gen1_driver({"off 1": "E100: Command failed"})
+        self.assertFalse(driver.turn_off(1).success)
+
+    def test_full_cycle_over_ssh(self):
+        with MockPduServer(vendor="apc", channel_count=8, model_name="APC AP7900 Switched Rack PDU",
+                           apc_generation="rpdu") as server:
+            self.assertEqual(ApcAp7900Driver.identify(server.host, server.port), "AP7900")
+            driver = ApcAp7900Driver()
+            driver.connect(server.host, server.port)
+            try:
+                self.assertEqual(driver.turn_off(4).raw, "OK")
+                status = driver.get_status(4)
+                self.assertEqual(status.status, "OFF")
+                self.assertEqual(status.raw, "OK\n4:OFF:Outlet 4")
+                self.assertIs(driver.dialect, RPDU)
+            finally:
+                driver.disconnect()
+
+    def test_faults_on_first_generation(self):
+        with MockPduServer(vendor="apc", channel_count=8, apc_generation="rpdu", fault="command_error") as server:
+            driver = ApcAp7900Driver()
+            driver.connect(server.host, server.port)
+            self.assertFalse(driver.turn_on(1).success)
+            driver.disconnect()
+        with MockPduServer(vendor="apc", channel_count=8, apc_generation="rpdu", fault="stuck_outlet") as server:
+            driver = ApcAp7900Driver()
+            driver.connect(server.host, server.port)
+            self.assertTrue(driver.turn_off(1).success)
+            self.assertEqual(driver.get_status(1).status, "ON")
+            driver.disconnect()
 
 
 class TestApcOverSsh(unittest.TestCase):
