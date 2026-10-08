@@ -24,8 +24,10 @@ deb: clean
 	mkdir -p $(BUILD_DIR)/opt/$(PKG_NAME)
 	mkdir -p $(BUILD_DIR)/usr/bin
 
-	# Copy official source files
+	# Copy official source files (without bytecode caches or Finder metadata from the build machine)
 	cp -r equipment_drivers $(BUILD_DIR)/opt/$(PKG_NAME)/
+	find $(BUILD_DIR) -name __pycache__ -prune -exec rm -rf {} +
+	find $(BUILD_DIR) -name .DS_Store -delete
 	# Remove simulator and the CLIs built on it from official package — engineering only
 	rm -f $(BUILD_DIR)/opt/$(PKG_NAME)/equipment_drivers/simulator.py
 	rm -f $(BUILD_DIR)/opt/$(PKG_NAME)/equipment_drivers/cli/trial.py
@@ -46,7 +48,7 @@ deb: clean
 	echo "Architecture: $(ARCH)"                                    >> $(BUILD_DIR)/DEBIAN/control
 	echo "Maintainer: Equipment Admin <admin@example.com>"          >> $(BUILD_DIR)/DEBIAN/control
 	echo "Description: ISS Equipment Utilities (Official Release)"  >> $(BUILD_DIR)/DEBIAN/control
-	echo "Depends: python3"                                         >> $(BUILD_DIR)/DEBIAN/control
+	echo "Depends: python3 (>= 3.10), python3-requests, python3-paramiko" >> $(BUILD_DIR)/DEBIAN/control
 
 	dpkg-deb --build $(BUILD_DIR)
 	mv build/*.deb .
@@ -68,8 +70,10 @@ deb-engineering: clean
 	mkdir -p $(BUILD_ENG_DIR)/opt/$(PKG_ENG_NAME)
 	mkdir -p $(BUILD_ENG_DIR)/usr/bin
 
-	# Copy all source files including simulator
+	# Copy all source files including simulator (without bytecode caches or Finder metadata)
 	cp -r equipment_drivers $(BUILD_ENG_DIR)/opt/$(PKG_ENG_NAME)/
+	find $(BUILD_ENG_DIR) -name __pycache__ -prune -exec rm -rf {} +
+	find $(BUILD_ENG_DIR) -name .DS_Store -delete
 
 	# Official utilities
 	cp iss_pdu_utility      $(BUILD_ENG_DIR)/opt/$(PKG_ENG_NAME)/
@@ -96,7 +100,8 @@ deb-engineering: clean
 	echo "Architecture: $(ARCH)"                                                         >> $(BUILD_ENG_DIR)/DEBIAN/control
 	echo "Maintainer: Equipment Admin <admin@example.com>"                               >> $(BUILD_ENG_DIR)/DEBIAN/control
 	echo "Description: ISS Equipment Utilities (Engineering Release — includes mock/trial tools)" >> $(BUILD_ENG_DIR)/DEBIAN/control
-	echo "Depends: python3"                                                              >> $(BUILD_ENG_DIR)/DEBIAN/control
+	echo "Depends: python3 (>= 3.10), python3-requests, python3-paramiko"                >> $(BUILD_ENG_DIR)/DEBIAN/control
+	echo "Recommends: openssl"                                                           >> $(BUILD_ENG_DIR)/DEBIAN/control
 
 	dpkg-deb --build $(BUILD_ENG_DIR)
 	mv build/*.deb .
