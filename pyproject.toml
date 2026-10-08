@@ -10,6 +10,7 @@ requires-python = ">=3.10"
 license = {text = "MIT"}
 dependencies = [
     "requests>=2.31,<3",
+    "paramiko>=3.4,<6",
 ]
 
 [project.optional-dependencies]

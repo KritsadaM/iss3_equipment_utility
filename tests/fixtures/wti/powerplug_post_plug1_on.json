@@ -1,0 +1,1 @@
+{"status": {"code": "0", "text": "ok"}, "powerplugs": [{"plug": "1", "plugname": "Outlet_A1", "state": "on", "busy": "0", "bootdelay": "0.5 Secs", "priority": "1", "plugoffreason": "0"}]}

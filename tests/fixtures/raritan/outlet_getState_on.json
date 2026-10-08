@@ -1,0 +1,1 @@
+{"jsonrpc": "2.0", "result": {"_ret_": {"available": true, "powerState": 1, "switchOnInProgress": false, "cycleInProgress": false, "isLoadShed": false, "lastPowerStateChange": 1759900000}}, "id": 1}

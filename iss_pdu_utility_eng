@@ -24,8 +24,8 @@ def main():
         description="PDU Control Utility [Engineering Edition — includes --mock support]")
     parser.add_argument("--ip_address", default=None,
                         help="IP address of the PDU (required unless --mock is used)")
-    parser.add_argument("--port", type=int, default=161,
-                        help="Port of the PDU (default: 161)")
+    parser.add_argument("--port", type=int, default=None,
+                        help="Port of the PDU (default: the vendor's own port -- APC 22/SSH, WTI and Raritan 80/HTTP)")
     parser.add_argument("--mock", action="store_true",
                         help="Run against an internal mock PDU simulator (no real hardware needed)")
     parser.add_argument("--model", type=str, default=None,
@@ -57,8 +57,12 @@ def main():
                 sys.exit(1)
             sig = args.model
         elif args.ip_address:
-            driver_cls = type(discover_and_instantiate(args.ip_address, args.port, "pdu"))
-            sig = "apc_ap7900"
+            discovered = discover_and_instantiate(args.ip_address, args.port, "pdu")
+            if not discovered:
+                logger.error("Failed to detect PDU model or find suitable driver.")
+                sys.exit(1)
+            driver_cls = type(discovered)
+            sig = next(s for s, cls in registry.get_all_drivers("pdu") if cls is driver_cls)
         else:
             driver_cls = registry.get_driver("pdu", "apc_ap7900")
             sig = "apc_ap7900"

@@ -28,6 +28,16 @@ iss_pdu_utility --ip_address 192.168.1.40 --port 80 off 3
 iss_pdu_utility --ip_address 192.168.1.40 --port 80 status 3
 ```
 
+`--port` is optional. If you leave it out, each vendor uses its own default:
+
+| Vendor | Protocol | Default port | `RAW_OUTPUT` is |
+|---|---|---|---|
+| APC | NMC command line over SSH (`olOn` / `olOff` / `olStatus`) | 22 | CLI text, e.g. `E000: Success` / ` 3: Outlet 3: On` |
+| WTI | REST API (`/api/v2/config/powerplug`) | 80 (HTTPS on 443) | JSON from the PDU |
+| Raritan | Xerus JSON-RPC (`/model/pdu/0/outlet/<n>`) | 80 (HTTPS on 443) | JSON-RPC response from the PDU |
+
+`RAW_OUTPUT` is always exactly what the PDU sent back, so WTI and Raritan show JSON because that is what those PDUs return.
+
 Multiple channels can be controlled simultaneously:
 
 ```bash
@@ -103,6 +113,16 @@ driver = WtiVmrHd4d20Driver()
 driver.connect("192.168.1.40", 80)
 response = driver.turn_on(3)
 # response.success, response.action, response.channel, response.raw, response.status, response.model
+```
+
+### Mock / engineering tools
+
+Without hardware, the engineering package can simulate every PDU model. APC is served as an SSH CLI, WTI and Raritan as HTTP APIs. The response formats follow vendor documentation, see `tests/fixtures/README.md` for sources.
+
+```bash
+iss_pdu_utility_eng --mock --model apc_ap7900 status all   # in-process mock
+iss_trial_utility --all                                    # 9-step trial of every model
+iss_mock_server --vendor apc                               # standalone: ssh -p 2222 apc@127.0.0.1
 ```
 
 ## Adding a new driver

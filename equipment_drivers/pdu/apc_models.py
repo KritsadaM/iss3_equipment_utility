@@ -1,35 +1,60 @@
 import logging
-from typing import Optional, Tuple
-import requests
-from requests.auth import HTTPBasicAuth
+import re
+from typing import Dict, Optional, Tuple
 from equipment_drivers.interfaces import PDUDriver
 from equipment_drivers.responses import PDUResponse
-from equipment_drivers.exceptions import EquipmentConnectionError, EquipmentCommandError, EquipmentNotConnectedError
+from equipment_drivers.cli_transport import SshCliTransport
+from equipment_drivers.exceptions import EquipmentCommandError, EquipmentNotConnectedError
 
 logger = logging.getLogger(__name__)
+
+# Result codes printed by the APC NMC CLI ("E000: Success", "E102: Parameter Error", ...).
+# E000/E001 mean the command was accepted; everything else is a failure.
+_APC_SUCCESS_CODES = ("000", "001")
+_RESULT_CODE_RE = re.compile(r"^\s*E(\d{3}):", re.MULTILINE)
+# olStatus lines look like " 3: Outlet 3: On" -- number, outlet name, state.
+_OUTLET_LINE_RE = re.compile(r"^\s*(\d+):\s*(.*?):\s*(On|Off)\b", re.MULTILINE | re.IGNORECASE)
+
+
+def parse_result_code(output: str) -> Optional[str]:
+    """Return the 3-digit code from the 'Exxx: <message>' line, or None if absent."""
+    match = _RESULT_CODE_RE.search(output)
+    return match.group(1) if match else None
+
+
+def parse_outlet_states(output: str) -> Dict[int, str]:
+    """Map outlet number -> 'ON'/'OFF' from olStatus output."""
+    return {int(num): state.upper() for num, _name, state in _OUTLET_LINE_RE.findall(output)}
 
 
 class BaseApcPduDriver(PDUDriver):
     """
     Base driver for APC Switched Rack PDUs (AP79xx / AP89xx / AP86xx series).
-    Supports HTTP/REST interaction with APC Network Management Cards.
+
+    APC Network Management Cards have no REST API for outlet control; this
+    driver uses the NMC command line over SSH (olOn / olOff / olStatus), so
+    PDUResponse.raw is the CLI text the PDU printed, e.g.:
+
+        E000: Success
+         3: Outlet 3: On
     """
     MODEL_NAME = "APC Switched Rack PDU"
     DEFAULT_CHANNEL_COUNT = 8
-    DEFAULT_PORT = 80
+    DEFAULT_PORT = 22
     IP_SUFFIX = ""
+    # Swappable so tests can inject a fake CLI session.
+    transport_factory = SshCliTransport
 
     def __init__(self):
         self.ip = ""
         self.port = self.DEFAULT_PORT
-        self.base_url = ""
         self.connected = False
+        # NMC factory-default credentials.
         self.username = "apc"
         self.password = "apc"
-        self.auth = HTTPBasicAuth(self.username, self.password)
-        self.session = requests.Session()
-        self.timeout = 5
-        self.scheme = "http"
+        self.timeout = 10
+        self.transport = None
+        self._device_channel_count: Optional[int] = None
 
     @classmethod
     def probe(cls, ip: str, port: int) -> bool:
@@ -37,30 +62,29 @@ class BaseApcPduDriver(PDUDriver):
             return ip.endswith(cls.IP_SUFFIX)
         return False
 
-    def connect(self, ip: str, port: int, username: Optional[str] = None, password: Optional[str] = None) -> bool:
+    def connect(self, ip: str, port: Optional[int] = None, username: Optional[str] = None,
+                password: Optional[str] = None) -> bool:
         self.ip = ip
-        self.port = port
-        self.scheme = "https" if port == 443 else self.scheme
-        self.base_url = f"{self.scheme}://{self.ip}:{self.port}"
+        self.port = port or self.DEFAULT_PORT
         if username is not None:
             self.username = username
         if password is not None:
             self.password = password
-        self.auth = HTTPBasicAuth(self.username, self.password)
 
-        try:
-            response = self.session.get(f"{self.base_url}/rest/v1/device", auth=self.auth, timeout=self.timeout)
-            response.raise_for_status()
-            self.connected = True
-            logger.info(f"Connected to {self.get_model()} at {self.ip}:{self.port}")
-            return True
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Failed to connect to {self.get_model()} at {self.ip}:{self.port}: {e}")
-            raise EquipmentConnectionError(f"Connection to APC PDU failed: {e}")
+        transport = self.transport_factory()
+        # open() raises EquipmentConnectionError on failure.
+        transport.open(self.ip, self.port, self.username, self.password, timeout=self.timeout)
+        self.transport = transport
+        self.connected = True
+        logger.info(f"Connected to {self.get_model()} at {self.ip}:{self.port} (SSH CLI)")
+        return True
 
     def disconnect(self) -> bool:
-        self.session.close()
+        if self.transport is not None:
+            self.transport.close()
+            self.transport = None
         self.connected = False
+        self._device_channel_count = None
         logger.info(f"Disconnected from {self.get_model()} at {self.ip}:{self.port}")
         return True
 
@@ -68,51 +92,57 @@ class BaseApcPduDriver(PDUDriver):
         return self.MODEL_NAME
 
     def get_channel_count(self) -> int:
-        return self.DEFAULT_CHANNEL_COUNT
+        if not self.connected:
+            return self.DEFAULT_CHANNEL_COUNT
+        # Queried once per session: validate_channel() calls this before every action.
+        if self._device_channel_count is None:
+            try:
+                states = parse_outlet_states(self._run("olStatus all"))
+                self._device_channel_count = max(states) if states else self.DEFAULT_CHANNEL_COUNT
+            except Exception as e:
+                logger.warning(f"Could not query outlet count from {self.get_model()}, falling back to default: {e}")
+                self._device_channel_count = self.DEFAULT_CHANNEL_COUNT
+        return self._device_channel_count
 
-    def _control_outlet(self, channel: int, state: str) -> Tuple[bool, str]:
+    def _run(self, command: str) -> str:
+        if not self.connected or self.transport is None:
+            raise EquipmentNotConnectedError("Not connected to PDU")
+        try:
+            return self.transport.send(command)
+        except Exception as e:
+            logger.error(f"CLI command '{command}' failed on {self.get_model()}: {e}")
+            raise EquipmentCommandError(f"APC CLI command '{command}' failed: {e}")
+
+    def _run_outlet_command(self, command: str, channel: int) -> Tuple[bool, str]:
         if not self.connected:
             raise EquipmentNotConnectedError("Not connected to PDU")
         self.validate_channel(channel)
-
-        url = f"{self.base_url}/rest/v1/power/outlets/{channel}"
-        payload = {"state": state}
-        try:
-            response = self.session.put(url, json=payload, auth=self.auth, timeout=self.timeout)
-            response.raise_for_status()
-            return True, response.text
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Failed to control outlet {channel} on {self.get_model()}: {e}")
-            raise EquipmentCommandError(f"APC Outlet Control API Error: {e}")
+        raw = self._run(f"{command} {channel}")
+        code = parse_result_code(raw)
+        if code not in _APC_SUCCESS_CODES:
+            logger.error(f"{command} {channel} on {self.get_model()} returned: {raw.strip() or '<no output>'}")
+            return False, raw
+        return True, raw
 
     def turn_on(self, channel: int) -> PDUResponse:
         logger.info(f"Turning ON channel {channel} on {self.get_model()}")
-        success, raw = self._control_outlet(channel, "ON")
+        success, raw = self._run_outlet_command("olOn", channel)
         return PDUResponse(success=success, action="turn_on", channel=channel, raw=raw)
 
     def turn_off(self, channel: int) -> PDUResponse:
         logger.info(f"Turning OFF channel {channel} on {self.get_model()}")
-        success, raw = self._control_outlet(channel, "OFF")
+        success, raw = self._run_outlet_command("olOff", channel)
         return PDUResponse(success=success, action="turn_off", channel=channel, raw=raw)
 
     def get_status(self, channel: int) -> PDUResponse:
-        if not self.connected:
-            raise EquipmentNotConnectedError("Not connected to PDU")
-        self.validate_channel(channel)
-
-        url = f"{self.base_url}/rest/v1/power/outlets/{channel}"
-        try:
-            response = self.session.get(url, auth=self.auth, timeout=self.timeout)
-            response.raise_for_status()
-            data = response.json()
-            raw_text = response.text
-
-            state = data.get("state", "").upper()
-            status = "ON" if state in ("ON", "1", "TRUE") else ("OFF" if state in ("OFF", "0", "FALSE") else f"UNKNOWN ({state})")
-            return PDUResponse(success=True, action="get_status", channel=channel, raw=raw_text, status=status)
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Failed to get status for outlet {channel} on {self.get_model()}: {e}")
-            raise EquipmentCommandError(f"APC Outlet Status API Error: {e}")
+        success, raw = self._run_outlet_command("olStatus", channel)
+        status = None
+        if success:
+            status = parse_outlet_states(raw).get(channel)
+            if status is None:
+                success = False
+                status = "UNKNOWN"
+        return PDUResponse(success=success, action="get_status", channel=channel, raw=raw, status=status)
 
 
 # ---------------------------------------------------------------------------
