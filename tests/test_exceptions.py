@@ -55,13 +55,15 @@ class TestDriversRaiseCustomExceptions(unittest.TestCase):
             driver.turn_on(1)
 
     def test_apc_connect_failure_raises_connection_error(self):
-        from unittest.mock import patch
+        import socket
         from equipment_drivers.pdu.apc_models import BaseApcPduDriver
-        import requests
+        # Grab a free local port and close it so the SSH connect is refused.
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            closed_port = s.getsockname()[1]
         driver = BaseApcPduDriver()
-        with patch.object(driver.session, 'get', side_effect=requests.exceptions.ConnectionError("refused")):
-            with self.assertRaises(EquipmentConnectionError):
-                driver.connect("10.0.0.1", 80)
+        with self.assertRaises(EquipmentConnectionError):
+            driver.connect("127.0.0.1", closed_port)
 
 
 if __name__ == "__main__":

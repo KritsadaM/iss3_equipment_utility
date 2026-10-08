@@ -93,10 +93,9 @@ class TestRegistryIntegrity(unittest.TestCase):
 class TestHttpsScheme(unittest.TestCase):
     """Verify HTTPS support via port-based scheme detection."""
 
-    def test_apc_defaults_to_http(self):
+    def test_apc_uses_ssh_cli_port(self):
         from equipment_drivers.pdu.apc_models import BaseApcPduDriver
-        driver = BaseApcPduDriver()
-        self.assertEqual(driver.scheme, "http")
+        self.assertEqual(BaseApcPduDriver.DEFAULT_PORT, 22)
 
     def test_wti_defaults_to_http(self):
         from equipment_drivers.pdu.wti_models import BaseWtiPduDriver

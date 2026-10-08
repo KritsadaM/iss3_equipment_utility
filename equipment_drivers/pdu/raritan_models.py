@@ -1,5 +1,6 @@
+import itertools
 import logging
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 import requests
 from requests.auth import HTTPBasicAuth, HTTPDigestAuth
 from equipment_drivers.interfaces import PDUDriver
@@ -8,11 +9,21 @@ from equipment_drivers.exceptions import EquipmentConnectionError, EquipmentComm
 
 logger = logging.getLogger(__name__)
 
+# pdumodel.Outlet.PowerState enum values as they appear on the wire.
+_PS_OFF = 0
+_PS_ON = 1
+
 
 class BaseRaritanPduDriver(PDUDriver):
     """
     Base driver for Raritan Intelligent Rack PDUs (PX2, PX3, Dominion PX series).
-    Communicates via Raritan JSON-RPC / REST API (Xerus OS).
+
+    Uses the Xerus JSON-RPC 2.0 API: every call is an HTTP POST of
+    {"jsonrpc": "2.0", "method": ..., "params": ..., "id": N} to a resource
+    ID (RID) path, and the reply carries the return value in result._ret_.
+        /model/pdu/0             getMetaData, getOutlets
+        /model/pdu/0/outlet/<i>  getState, setPowerState {"pstate": 0|1}   (i = channel - 1)
+    PDUResponse.raw is the JSON-RPC response body the PDU returned.
     """
     MODEL_NAME = "Raritan Intelligent Rack PDU"
     DEFAULT_CHANNEL_COUNT = 8
@@ -30,6 +41,7 @@ class BaseRaritanPduDriver(PDUDriver):
         self.session = requests.Session()
         self.timeout = 5
         self.scheme = "http"
+        self._request_ids = itertools.count(1)
 
     @classmethod
     def probe(cls, ip: str, port: int) -> bool:
@@ -37,10 +49,28 @@ class BaseRaritanPduDriver(PDUDriver):
             return ip.endswith(cls.IP_SUFFIX)
         return False
 
-    def connect(self, ip: str, port: int, username: Optional[str] = None, password: Optional[str] = None) -> bool:
+    def _rpc(self, rid: str, method: str, params: Optional[dict] = None) -> Tuple[Any, str]:
+        """POST one JSON-RPC call to `rid`. Returns (result._ret_, raw response body).
+        Raises EquipmentCommandError on transport errors or a JSON-RPC error reply."""
+        body = {"jsonrpc": "2.0", "method": method, "id": next(self._request_ids)}
+        if params is not None:
+            body["params"] = params
+        response = self.session.post(f"{self.base_url}{rid}", json=body, auth=self.auth, timeout=self.timeout)
+        response.raise_for_status()
+        try:
+            data = response.json()
+        except ValueError as e:
+            raise EquipmentCommandError(f"Raritan {method} on {rid} returned non-JSON body: {e}")
+        if "error" in data:
+            err = data["error"]
+            raise EquipmentCommandError(f"Raritan {method} on {rid} failed: {err.get('code')} {err.get('message')}")
+        return data.get("result", {}).get("_ret_"), response.text
+
+    def connect(self, ip: str, port: Optional[int] = None, username: Optional[str] = None,
+                password: Optional[str] = None) -> bool:
         self.ip = ip
-        self.port = port
-        self.scheme = "https" if port == 443 else self.scheme
+        self.port = port or self.DEFAULT_PORT
+        self.scheme = "https" if self.port == 443 else self.scheme
         self.base_url = f"{self.scheme}://{self.ip}:{self.port}"
 
         if username is not None:
@@ -53,16 +83,18 @@ class BaseRaritanPduDriver(PDUDriver):
         disp_port = getattr(self, "display_port", None) or self.port
 
         try:
-            response = self.session.get(f"{self.base_url}/model/pdu/0", auth=self.auth, timeout=self.timeout)
-            if response.status_code == 401:
+            try:
+                _, raw = self._rpc("/model/pdu/0", "getMetaData")
+            except requests.exceptions.HTTPError as e:
+                if e.response is None or e.response.status_code != 401:
+                    raise
                 self.auth = HTTPBasicAuth(self.username, self.password)
-                response = self.session.get(f"{self.base_url}/model/pdu/0", auth=self.auth, timeout=self.timeout)
-            response.raise_for_status()
+                _, raw = self._rpc("/model/pdu/0", "getMetaData")
             self.connected = True
-            self.raw_connection = str(response.text) if hasattr(response, "text") else ""
+            self.raw_connection = raw
             logger.info(f"Connected to {self.get_model()} at {disp_ip}:{disp_port}")
             return True
-        except requests.exceptions.RequestException as e:
+        except (requests.exceptions.RequestException, EquipmentCommandError) as e:
             logger.error(f"Failed to connect to {self.get_model()} at {disp_ip}:{disp_port}: {e}")
             raise EquipmentConnectionError(f"Connection to Raritan PDU failed: {e}")
 
@@ -78,53 +110,48 @@ class BaseRaritanPduDriver(PDUDriver):
         return self.MODEL_NAME
 
     def get_channel_count(self) -> int:
+        if not self.connected:
+            return self.DEFAULT_CHANNEL_COUNT
+        try:
+            outlets, _ = self._rpc("/model/pdu/0", "getOutlets")
+            if isinstance(outlets, list) and outlets:
+                return len(outlets)
+        except Exception as e:
+            logger.warning(f"Could not query outlet count from {self.get_model()}, falling back to default: {e}")
         return self.DEFAULT_CHANNEL_COUNT
 
-    def _control_outlet(self, channel: int, power_state: int) -> Tuple[bool, str]:
+    def _outlet_rpc(self, channel: int, method: str, params: Optional[dict] = None) -> Tuple[Any, str]:
         if not self.connected:
             raise EquipmentNotConnectedError("Not connected to PDU")
         self.validate_channel(channel)
-
-        outlet_idx = channel - 1
-        url = f"{self.base_url}/model/outlet/{outlet_idx}"
-        payload = {"powerState": power_state}
         try:
-            response = self.session.put(url, json=payload, auth=self.auth, timeout=self.timeout)
-            response.raise_for_status()
-            return True, response.text
+            return self._rpc(f"/model/pdu/0/outlet/{channel - 1}", method, params)
         except requests.exceptions.RequestException as e:
-            logger.error(f"Failed to control outlet {channel} on {self.get_model()}: {e}")
-            raise EquipmentCommandError(f"Raritan Outlet Control API Error: {e}")
+            logger.error(f"{method} failed for outlet {channel} on {self.get_model()}: {e}")
+            raise EquipmentCommandError(f"Raritan Outlet API Error: {e}")
+
+    def _set_power_state(self, channel: int, pstate: int) -> Tuple[bool, str]:
+        ret, raw = self._outlet_rpc(channel, "setPowerState", {"pstate": pstate})
+        # setPowerState returns 0 on success, a non-zero error code otherwise.
+        return ret == 0, raw
 
     def turn_on(self, channel: int) -> PDUResponse:
         logger.info(f"Turning ON channel {channel} on {self.get_model()}")
-        success, raw = self._control_outlet(channel, 1)
+        success, raw = self._set_power_state(channel, _PS_ON)
         return PDUResponse(success=success, action="turn_on", channel=channel, raw=raw)
 
     def turn_off(self, channel: int) -> PDUResponse:
         logger.info(f"Turning OFF channel {channel} on {self.get_model()}")
-        success, raw = self._control_outlet(channel, 0)
+        success, raw = self._set_power_state(channel, _PS_OFF)
         return PDUResponse(success=success, action="turn_off", channel=channel, raw=raw)
 
     def get_status(self, channel: int) -> PDUResponse:
-        if not self.connected:
-            raise EquipmentNotConnectedError("Not connected to PDU")
-        self.validate_channel(channel)
-
-        outlet_idx = channel - 1
-        url = f"{self.base_url}/model/outlet/{outlet_idx}"
-        try:
-            response = self.session.get(url, auth=self.auth, timeout=self.timeout)
-            response.raise_for_status()
-            data = response.json()
-            raw_text = response.text
-
-            power_state = data.get("powerState", 0)
-            status = "ON" if power_state in (1, "1", "on", "ON", "closed") else "OFF"
-            return PDUResponse(success=True, action="get_status", channel=channel, raw=raw_text, status=status)
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Failed to get status for outlet {channel} on {self.get_model()}: {e}")
-            raise EquipmentCommandError(f"Raritan Outlet Status API Error: {e}")
+        state, raw = self._outlet_rpc(channel, "getState")
+        if not isinstance(state, dict) or not state.get("available", True):
+            return PDUResponse(success=False, action="get_status", channel=channel, raw=raw, status="UNKNOWN")
+        power_state = state.get("powerState")
+        status = {_PS_ON: "ON", _PS_OFF: "OFF"}.get(power_state, f"UNKNOWN ({power_state})")
+        return PDUResponse(success=True, action="get_status", channel=channel, raw=raw, status=status)
 
 
 # ---------------------------------------------------------------------------

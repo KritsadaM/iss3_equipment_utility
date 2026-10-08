@@ -29,7 +29,11 @@ def resolve_pdu_driver(model_arg, ip_arg, port_arg, is_buyoff):
     Resolves (signature, driver_class, display_ip, display_port).
     Handles explicit model signature, IP probe auto-discovery, and Buy-off defaults.
     """
-    port = port_arg if port_arg is not None else 80
+    def port_for(cls):
+        # No --port given: use the vendor's own default (APC 22/SSH, WTI and Raritan 80/HTTP).
+        return port_arg if port_arg is not None else getattr(cls, "DEFAULT_PORT", 80)
+
+    port = port_arg
     all_drivers = dict(registry.get_all_drivers("pdu"))
 
     if model_arg:
@@ -46,7 +50,7 @@ def resolve_pdu_driver(model_arg, ip_arg, port_arg, is_buyoff):
             logger.error(f"Unknown model signature '{model_arg}'. Use iss_trial_utility --list to see all signatures.")
             sys.exit(1)
         display_ip = ip_arg or "192.168.1.50"
-        return sig, driver_cls, display_ip, port
+        return sig, driver_cls, display_ip, port_for(driver_cls)
 
     if ip_arg:
         for signature, cls in all_drivers.items():
@@ -54,13 +58,14 @@ def resolve_pdu_driver(model_arg, ip_arg, port_arg, is_buyoff):
                 continue
             try:
                 if cls.probe(ip_arg, port):
-                    return signature, cls, ip_arg, port
+                    return signature, cls, ip_arg, port_for(cls)
             except Exception:
                 pass
 
         if is_buyoff:
             sig = "apc_ap7900"
-            return sig, registry.get_driver("pdu", sig), ip_arg, port
+            driver_cls = registry.get_driver("pdu", sig)
+            return sig, driver_cls, ip_arg, port_for(driver_cls)
         else:
             driver_instance = discover_and_instantiate(ip_arg, port, "pdu")
             if not driver_instance:
@@ -72,10 +77,11 @@ def resolve_pdu_driver(model_arg, ip_arg, port_arg, is_buyoff):
                 if c == driver_cls:
                     sig = s
                     break
-            return sig, driver_cls, ip_arg, port
+            return sig, driver_cls, ip_arg, port_for(driver_cls)
 
     sig = "apc_ap7900"
-    return sig, registry.get_driver("pdu", sig), "192.168.1.50", port
+    driver_cls = registry.get_driver("pdu", sig)
+    return sig, driver_cls, "192.168.1.50", port_for(driver_cls)
 
 
 def main():
@@ -83,7 +89,7 @@ def main():
     parser.add_argument("--ip_address", default=None,
                         help="IP address of the PDU (required unless in Buy-off mode)")
     parser.add_argument("--port", type=int, default=None,
-                        help="Port of the PDU (default: 80 for HTTP REST PDUs)")
+                        help="Port of the PDU (default: the vendor's own port -- APC 22/SSH, WTI and Raritan 80/HTTP)")
     parser.add_argument("--buyoff", "--buy-off", "--mock", action="store_true", dest="buyoff",
                         help="Run in Buy-off mode against internal PDU simulator (simulates authentic hardware responses)")
     parser.add_argument("--model", type=str, default=None,

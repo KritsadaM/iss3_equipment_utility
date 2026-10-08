@@ -1,0 +1,25 @@
+{
+  "jsonrpc": "2.0",
+  "result": {
+    "_ret_": {
+      "nameplate": {
+        "manufacturer": "Raritan",
+        "brand": "",
+        "model": "PX4-5917-E7V2",
+        "partNumber": "",
+        "serialNumber": "R1BZ0546A42",
+        "rating": {
+          "voltage": "380-415V",
+          "current": "32A",
+          "frequency": "50/60Hz",
+          "power": "21.1-23.0kVA"
+        }
+      },
+      "fwRevision": "4.1.0.5-49727",
+      "macAddress": "02:fa:c9:fe:40:85",
+      "hasSwitchableOutlets": true,
+      "hasMeteredOutlets": true
+    }
+  },
+  "id": 42
+}

@@ -5,6 +5,12 @@ import threading
 from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Dict, Optional, Type
+from urllib.parse import parse_qs, urlparse
+
+try:
+    import paramiko
+except ImportError:  # only needed for the APC (SSH CLI) mock
+    paramiko = None
 
 # Ensure equipment_drivers interfaces and registry are importable
 from equipment_drivers.interfaces import PDUDriver
@@ -26,12 +32,14 @@ RESET = "\033[0m"
 
 class MockEquipmentHandler(BaseHTTPRequestHandler):
     """
-    HTTP Request Handler that simulates authentic APC, WTI, and Raritan REST APIs,
-    returning structured responses matching real physical PDU equipment.
+    HTTP request handler that simulates the WTI RESTful API and the Raritan
+    Xerus JSON-RPC API. Response shapes follow the vendors' published
+    documentation (see tests/fixtures/README.md for sources). APC PDUs are
+    CLI-only and are simulated by _ApcSshServer instead.
     """
-    vendor: str = "apc"
-    model_name: str = "APC AP7900 Switched Rack PDU"
-    model_signature: str = "apc_ap7900"
+    vendor: str = "wti"
+    model_name: str = ""
+    model_signature: str = ""
     channel_count: int = 8
     voltage: float = 120.0
     outlet_states: Dict[int, int] = {}  # channel -> 1 (ON) or 0 (OFF)
@@ -56,246 +64,387 @@ class MockEquipmentHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def do_GET(self):
-        path = self.path
-
-        # -------------------------------------------------------------
-        # APC Mock Endpoints (Matching real APC NMC2/NMC3 REST API)
-        # -------------------------------------------------------------
-        if self.vendor == "apc":
-            if path in ("/rest/v1/device", "/rest/v1/device/"):
-                model_id = self.model_signature.replace("apc_", "").upper() if self.model_signature else "AP7900"
-                name = self.model_name or f"APC {model_id} Switched Rack PDU"
-                return self._send_json(200, {
-                    "model": model_id,
-                    "name": name,
-                    "hardwareRevision": "B2",
-                    "firmwareVersion": "v6.9.6",
-                    "serialNumber": f"ZA{abs(hash(name)) % 10000000000:010d}",
-                    "manufactureDate": "10/24/2020",
-                    "macAddress": "00:C0:B7:12:34:56",
-                    "status": "operational",
-                    "outlets": self.channel_count,
-                    "uptime": "124 days, 14:22:10"
-                })
-            if path.startswith("/rest/v1/power/outlets/"):
-                try:
-                    channel = int(path.split("/")[-1])
-                    state_int = self.outlet_states.get(channel, 1)
-                    state_str = "ON" if state_int == 1 else "OFF"
-                    voltage = self.voltage
-                    current = 1.25 if state_int == 1 else 0.0
-                    power = round(voltage * current, 1) if state_int == 1 else 0.0
-                    power_factor = 0.98 if state_int == 1 else 0.0
-                    energy = 45.2 if state_int == 1 else 0.0
-                    return self._send_json(200, {
-                        "id": channel,
-                        "name": f"Outlet {channel}",
-                        "state": state_str,
-                        "status": "Normal",
-                        "externalId": channel,
-                        "voltage": voltage,
-                        "current": current,
-                        "power": power,
-                        "energy": energy,
-                        "powerFactor": power_factor
-                    })
-                except ValueError:
-                    return self._send_json(400, {"error": "Invalid outlet id"})
-
-        # -------------------------------------------------------------
-        # WTI Mock Endpoints (Matching real WTI REST API v2)
-        # -------------------------------------------------------------
-        elif self.vendor == "wti":
-            if path in ("/api/v2/status", "/api/v2/status/"):
-                prod_name = self.model_name.replace("WTI ", "") if self.model_name else "VMR-HD4D20 C19"
-                return self._send_json(200, {
-                    "status": 0,
-                    "status_message": "successful",
-                    "product": prod_name,
-                    "hostname": "WTI-PDU",
-                    "version": "v3.52",
-                    "serial_number": f"WT{abs(hash(prod_name)) % 100000000:08d}",
-                    "total_plugs": self.channel_count,
-                    "active_alarms": 0,
-                    "unit_status": "normal",
-                    "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                })
-            if path in ("/api/v2/plugs", "/api/v2/plugs/"):
-                plugs = []
-                for ch in range(1, self.channel_count + 1):
-                    st = self.outlet_states.get(ch, 1)
-                    plugs.append({
-                        "id": ch,
-                        "name": f"Plug {ch}",
-                        "status": st,
-                        "plug_status": st,
-                        "boot_delay": 5,
-                        "sequence_delay": 1,
-                        "default_state": 1,
-                        "current": 1.25 if st == 1 else 0.0,
-                        "voltage": self.voltage,
-                        "power": round(self.voltage * 1.25, 1) if st == 1 else 0.0
-                    })
-                return self._send_json(200, plugs)
-            if path.startswith("/api/v2/plugs/"):
-                try:
-                    channel = int(path.split("/")[-1])
-                    st = self.outlet_states.get(channel, 1)
-                    return self._send_json(200, {
-                        "status": st,
-                        "status_message": "successful",
-                        "id": channel,
-                        "name": f"Plug {channel}",
-                        "plug_status": st,
-                        "boot_delay": 5,
-                        "sequence_delay": 1,
-                        "default_state": 1,
-                        "current": 1.25 if st == 1 else 0.0,
-                        "voltage": self.voltage,
-                        "power": round(self.voltage * 1.25, 1) if st == 1 else 0.0
-                    })
-                except ValueError:
-                    return self._send_json(400, {"error": "Invalid plug id"})
-
-        # -------------------------------------------------------------
-        # Raritan Mock Endpoints (Matching real Raritan Xerus firmware JSON API)
-        # -------------------------------------------------------------
-        elif self.vendor == "raritan":
-            if path in ("/model/pdu/0", "/model/pdu/0/"):
-                model_str = self.model_name.replace("Raritan ", "").split()[0] if self.model_name else "PX3-5460"
-                return self._send_json(200, {
-                    "model": model_str,
-                    "name": self.model_name or f"Raritan {model_str} Switched PDU",
-                    "serial": f"PXC{abs(hash(model_str)) % 10000000:07d}",
-                    "manufacturer": "Raritan",
-                    "firmware": "3.6.0.5-47021",
-                    "outlets": self.channel_count,
-                    "status": "ready",
-                    "rating": {
-                        "voltage": int(self.voltage),
-                        "current": 30,
-                        "phases": 3 if self.voltage > 120 else 1
-                    }
-                })
-            if path.startswith("/model/outlet/"):
-                try:
-                    idx = int(path.split("/")[-1])
-                    channel = idx + 1
-                    power_state = self.outlet_states.get(channel, 1)
-                    return self._send_json(200, {
-                        "outlet": idx,
-                        "label": f"Outlet {channel}",
-                        "powerState": power_state,
-                        "isSwitchable": True,
-                        "activePower": 150.0 if power_state == 1 else 0.0,
-                        "apparentPower": 152.3 if power_state == 1 else 0.0,
-                        "voltage": self.voltage,
-                        "current": 0.72 if power_state == 1 else 0.0,
-                        "powerFactor": 0.98 if power_state == 1 else 0.0,
-                        "energy": 124.5 if power_state == 1 else 0.0
-                    })
-                except ValueError:
-                    return self._send_json(400, {"error": "Invalid outlet index"})
-
-        self._send_text(404, "Endpoint not found")
-
-    def do_PUT(self):
-        path = self.path
-        content_len = int(self.headers.get('Content-Length', 0))
-        post_body = self.rfile.read(content_len).decode('utf-8')
+    def _read_json_body(self):
+        content_len = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(content_len).decode("utf-8")
         try:
-            payload = json.loads(post_body) if post_body else {}
+            return json.loads(body) if body else {}
         except json.JSONDecodeError:
-            payload = {}
+            return None
 
-        # -------------------------------------------------------------
-        # APC Mock Endpoints
-        # -------------------------------------------------------------
-        if self.vendor == "apc":
-            if path.startswith("/rest/v1/power/outlets/"):
-                try:
-                    channel = int(path.split("/")[-1])
-                    state = str(payload.get("state", "ON")).upper()
-                    self.outlet_states[channel] = 1 if state in ("ON", "1", "TRUE") else 0
-                    state_str = "ON" if self.outlet_states[channel] == 1 else "OFF"
-                    return self._send_json(200, {
-                        "id": channel,
-                        "name": f"Outlet {channel}",
-                        "state": state_str,
-                        "status": "Normal",
-                        "commandStatus": "success",
-                        "message": f"Outlet {channel} state changed to {state_str} successfully",
-                        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-                    })
-                except ValueError:
-                    return self._send_json(400, {"error": "Invalid outlet id"})
+    def do_GET(self):
+        url = urlparse(self.path)
+        path = url.path.rstrip("/")
+        query = parse_qs(url.query)
 
-        # -------------------------------------------------------------
-        # WTI Mock Endpoints
-        # -------------------------------------------------------------
-        elif self.vendor == "wti":
-            if path.startswith("/api/v2/plugs/"):
-                try:
-                    channel = int(path.split("/")[-1])
-                    action = int(payload.get("action", 1))
-                    self.outlet_states[channel] = 1 if action == 1 else 0
-                    st = self.outlet_states[channel]
-                    verb = "ON" if st == 1 else "OFF"
-                    return self._send_json(200, {
-                        "status": 0,
-                        "status_message": "successful",
-                        "id": channel,
-                        "name": f"Plug {channel}",
-                        "action": action,
-                        "status": st,
-                        "plug_status": st,
-                        "message": f"Plug {channel} switched {verb} successfully"
-                    })
-                except ValueError:
-                    return self._send_json(400, {"error": "Invalid plug id"})
-
-        # -------------------------------------------------------------
-        # Raritan Mock Endpoints
-        # -------------------------------------------------------------
-        elif self.vendor == "raritan":
-            if path.startswith("/model/outlet/"):
-                try:
-                    idx = int(path.split("/")[-1])
-                    channel = idx + 1
-                    power_state = int(payload.get("powerState", 1))
-                    self.outlet_states[channel] = 1 if power_state == 1 else 0
-                    verb = "ON" if power_state == 1 else "OFF"
-                    return self._send_json(200, {
-                        "outlet": idx,
-                        "label": f"Outlet {channel}",
-                        "powerState": power_state,
-                        "result": "ok",
-                        "status": f"Outlet {channel} switched {verb} successfully"
-                    })
-                except ValueError:
-                    return self._send_json(400, {"error": "Invalid outlet index"})
+        if self.vendor == "wti":
+            if path == "/api/v2/status/status":
+                return self._send_json(200, self._wti_unit_status())
+            if path == "/api/v2/config/powerplug":
+                plug_ids = query.get("plug")
+                if not plug_ids:
+                    channels = list(range(1, self.channel_count + 1))
+                else:
+                    try:
+                        channels = [int(plug_ids[0])]
+                    except ValueError:
+                        return self._send_json(200, _WTI_INVALID_PLUG)
+                    if not 1 <= channels[0] <= self.channel_count:
+                        return self._send_json(200, _WTI_INVALID_PLUG)
+                return self._send_json(200, {"status": _WTI_OK,
+                                             "powerplugs": [self._wti_plug(ch) for ch in channels]})
 
         self._send_text(404, "Endpoint not found")
+
+    def do_POST(self):
+        path = urlparse(self.path).path.rstrip("/")
+        payload = self._read_json_body()
+
+        if self.vendor == "wti" and path == "/api/v2/config/powerplug":
+            if not isinstance(payload, dict):
+                return self._send_json(400, _WTI_INVALID_PLUG)
+            try:
+                channel = int(payload.get("plug", ""))
+            except ValueError:
+                return self._send_json(200, _WTI_INVALID_PLUG)
+            state = str(payload.get("state", "")).lower()
+            if not 1 <= channel <= self.channel_count or state not in ("on", "off", "boot", "default"):
+                return self._send_json(200, _WTI_INVALID_PLUG)
+            # "boot" power-cycles and "default" restores the configured default -- both end up ON here.
+            self.outlet_states[channel] = 0 if state == "off" else 1
+            return self._send_json(200, {"status": _WTI_OK, "powerplugs": [self._wti_plug(channel)]})
+
+        if self.vendor == "raritan":
+            if not isinstance(payload, dict) or payload.get("jsonrpc") != "2.0":
+                return self._send_json(200, _jsonrpc_error(None, -32700, "Parse error"))
+            req_id = payload.get("id")
+            method = payload.get("method")
+            params = payload.get("params") or {}
+
+            if path == "/model/pdu/0":
+                if method == "getMetaData":
+                    return self._send_json(200, _jsonrpc_result(req_id, self._raritan_metadata()))
+                if method == "getOutlets":
+                    outlets = [{"rid": f"/model/pdu/0/outlet/{i}", "type": "pdumodel.Outlet:2.1.4"}
+                               for i in range(self.channel_count)]
+                    return self._send_json(200, _jsonrpc_result(req_id, outlets))
+                return self._send_json(200, _jsonrpc_error(req_id, -32601, "Method not found"))
+
+            if path.startswith("/model/pdu/0/outlet/"):
+                try:
+                    idx = int(path.rsplit("/", 1)[-1])
+                except ValueError:
+                    idx = -1
+                if not 0 <= idx < self.channel_count:
+                    return self._send_text(404, "Resource not found")
+                channel = idx + 1
+                if method == "getState":
+                    return self._send_json(200, _jsonrpc_result(req_id, self._raritan_outlet_state(channel)))
+                if method == "setPowerState":
+                    pstate = params.get("pstate")
+                    if pstate not in (0, 1):
+                        return self._send_json(200, _jsonrpc_error(req_id, -32602, "Invalid params"))
+                    self.outlet_states[channel] = pstate
+                    return self._send_json(200, _jsonrpc_result(req_id, 0))
+                return self._send_json(200, _jsonrpc_error(req_id, -32601, "Method not found"))
+
+        self._send_text(404, "Endpoint not found")
+
+    # -- WTI payloads -------------------------------------------------------
+
+    def _wti_unit_status(self) -> dict:
+        product = self.model_name.replace("WTI ", "").split()[0] if self.model_name else "VMR-HD4D20"
+        return {
+            "status": _WTI_OK,
+            "vendor": "wti",
+            "product": product,
+            "totalports": "0",
+            "totalplugs": str(self.channel_count),
+            "softwareversion": "6.60 19 Feb 2020",
+            "serialnumber": f"{abs(hash(product)) % 10**14:014d}",
+            "assettag": "",
+            "siteid": "",
+        }
+
+    def _wti_plug(self, channel: int) -> dict:
+        return {
+            "plug": str(channel),
+            "plugname": f"Outlet_{channel}",
+            "state": "on" if self.outlet_states.get(channel, 1) == 1 else "off",
+            "busy": "0",
+            "bootdelay": "0.5 Secs",
+            "priority": str(channel),
+            "plugoffreason": "0",
+        }
+
+    # -- Raritan payloads ---------------------------------------------------
+
+    def _raritan_metadata(self) -> dict:
+        model = self.model_name.replace("Raritan ", "").split()[0] if self.model_name else "PX3-5460"
+        return {
+            "nameplate": {
+                "manufacturer": "Raritan",
+                "brand": "",
+                "model": model,
+                "partNumber": "",
+                "serialNumber": f"R{abs(hash(model)) % 10**10:010d}",
+                "rating": {
+                    "voltage": "200-240V" if self.voltage > 120 else "100-120V",
+                    "current": "30A",
+                    "frequency": "50/60Hz",
+                    "power": "",
+                },
+            },
+            "fwRevision": "4.1.0.5-49727",
+            "macAddress": "00:0d:5d:12:34:56",
+            "hasSwitchableOutlets": True,
+            "hasMeteredOutlets": True,
+        }
+
+    def _raritan_outlet_state(self, channel: int) -> dict:
+        return {
+            "available": True,
+            "powerState": self.outlet_states.get(channel, 1),
+            "switchOnInProgress": False,
+            "cycleInProgress": False,
+            "isLoadShed": False,
+            "lastPowerStateChange": int(datetime.now(timezone.utc).timestamp()),
+        }
+
+
+_WTI_OK = {"code": "0", "text": "OK"}
+# The WTI documentation doesn't show an error body; this shape is an assumption.
+_WTI_INVALID_PLUG = {"status": {"code": "1", "text": "Invalid plug"}}
+
+
+def _jsonrpc_result(req_id, ret) -> dict:
+    return {"jsonrpc": "2.0", "result": {"_ret_": ret}, "id": req_id}
+
+
+def _jsonrpc_error(req_id, code: int, message: str) -> dict:
+    return {"jsonrpc": "2.0", "error": {"code": code, "message": message}, "id": req_id}
+
+
+# ---------------------------------------------------------------------------
+# APC NMC CLI simulator (served over SSH, like the real Network Management Card)
+# ---------------------------------------------------------------------------
+
+APC_PROMPT = "apc>"
+
+
+class ApcCliEngine:
+    """Executes APC NMC CLI command lines against the mock's outlet state and
+    returns the text the real CLI would print (without the trailing prompt)."""
+
+    def __init__(self, model_name: str, channel_count: int, outlet_states: Dict[int, int]):
+        self.model_name = model_name or "APC Switched Rack PDU"
+        self.channel_count = channel_count
+        self.outlet_states = outlet_states
+
+    def banner(self) -> str:
+        now = datetime.now()
+        return (
+            "\r\n"
+            "American Power Conversion               Network Management Card AOS      v6.9.6\r\n"
+            "(c) Copyright 2020 All Rights Reserved  RPDU 2g Application               v6.9.6\r\n"
+            "-------------------------------------------------------------------------------\r\n"
+            f"Name      : {self.model_name[:38]:<38}  Date : {now:%m/%d/%Y}\r\n"
+            f"Contact   : Unknown                                 Time : {now:%H:%M:%S}\r\n"
+            "Location  : Unknown                                 User : Administrator\r\n"
+            "Up Time   : 0 Days 0 Hours 1 Minute                 Stat : P+ N4+ N6+ A+\r\n"
+            "\r\n"
+            "Type ? for command listing\r\n"
+            "Use tcpip command for IP address(-i), subnet(-s), and gateway(-g)\r\n"
+            "\r\n"
+        )
+
+    def execute(self, line: str) -> Optional[str]:
+        """Returns the command output, or None when the session should end."""
+        parts = line.split()
+        if not parts:
+            return ""
+        command = parts[0].lower()
+        arg = " ".join(parts[1:])
+
+        if command in ("exit", "quit", "bye"):
+            return None
+        if command in ("olon", "oloff", "olstatus"):
+            if not arg:
+                return "E102: Parameter Error"
+            try:
+                channels = parse_channels(arg, channel_count=self.channel_count)
+            except ValueError:
+                return "E102: Parameter Error"
+            if command == "olstatus":
+                lines = ["E000: Success"]
+                for ch in channels:
+                    state = "On" if self.outlet_states.get(ch, 1) == 1 else "Off"
+                    lines.append(f" {ch}: Outlet {ch}: {state}")
+                return "\n".join(lines)
+            for ch in channels:
+                self.outlet_states[ch] = 1 if command == "olon" else 0
+            return "E000: Success"
+        return "E101: Command Not Found"
+
+
+_HOST_KEY = None
+
+
+def _host_key():
+    global _HOST_KEY
+    if _HOST_KEY is None:
+        _HOST_KEY = paramiko.RSAKey.generate(2048)
+    return _HOST_KEY
+
+
+if paramiko is not None:
+    class _ApcSshInterface(paramiko.ServerInterface):
+        def __init__(self, username: Optional[str], password: Optional[str]):
+            self.username = username
+            self.password = password
+            self.shell_requested = threading.Event()
+
+        def get_allowed_auths(self, username):
+            return "password"
+
+        def check_auth_password(self, username, password):
+            if self.username is None or (username, password) == (self.username, self.password):
+                return paramiko.AUTH_SUCCESSFUL
+            return paramiko.AUTH_FAILED
+
+        def check_channel_request(self, kind, chanid):
+            if kind == "session":
+                return paramiko.OPEN_SUCCEEDED
+            return paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
+
+        def check_channel_pty_request(self, channel, term, width, height, pixelwidth, pixelheight, modes):
+            return True
+
+        def check_channel_shell_request(self, channel):
+            self.shell_requested.set()
+            return True
+
+
+class _ApcSshServer:
+    """Minimal SSH server presenting the APC NMC CLI. Exposes the same
+    serve_forever/shutdown/server_close/server_port surface as HTTPServer so
+    MockPduServer can drive either one."""
+
+    def __init__(self, address, engine_factory, username: Optional[str] = None, password: Optional[str] = None):
+        if paramiko is None:
+            raise RuntimeError("The APC mock server requires the 'paramiko' package (pip install paramiko)")
+        self._engine_factory = engine_factory
+        self._username = username
+        self._password = password
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._sock.bind(address)
+        self._sock.listen(5)
+        # Poll so shutdown() is noticed without relying on close() waking accept().
+        self._sock.settimeout(0.2)
+        self.server_port = self._sock.getsockname()[1]
+        self._stopping = threading.Event()
+        self._stopped = threading.Event()
+        self._transports = []
+
+    def serve_forever(self):
+        try:
+            while not self._stopping.is_set():
+                try:
+                    client, _addr = self._sock.accept()
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+                threading.Thread(target=self._handle_client, args=(client,), daemon=True).start()
+        finally:
+            self._stopped.set()
+
+    def shutdown(self):
+        self._stopping.set()
+        self._stopped.wait(timeout=2.0)
+        for transport in list(self._transports):
+            transport.close()
+
+    def server_close(self):
+        self._sock.close()
+
+    def _handle_client(self, client_sock):
+        transport = paramiko.Transport(client_sock)
+        self._transports.append(transport)
+        try:
+            transport.add_server_key(_host_key())
+            iface = _ApcSshInterface(self._username, self._password)
+            try:
+                transport.start_server(server=iface)
+            except paramiko.SSHException:
+                return
+            chan = transport.accept(timeout=10)
+            if chan is None or not iface.shell_requested.wait(timeout=10):
+                return
+            self._run_shell(chan, self._engine_factory())
+        except (EOFError, OSError, paramiko.SSHException):
+            pass
+        finally:
+            transport.close()
+            if transport in self._transports:
+                self._transports.remove(transport)
+
+    def _run_shell(self, chan, engine: "ApcCliEngine"):
+        chan.sendall((engine.banner() + APC_PROMPT).encode())
+        line = ""
+        last_was_cr = False
+        while not self._stopping.is_set():
+            data = chan.recv(1024)
+            if not data:
+                return
+            for ch in data.decode("utf-8", errors="replace"):
+                if ch == "\n" and last_was_cr:
+                    last_was_cr = False
+                    continue
+                last_was_cr = ch == "\r"
+                if ch in "\r\n":
+                    chan.sendall(b"\r\n")
+                    output = engine.execute(line)
+                    line = ""
+                    if output is None:
+                        chan.sendall(b"Connection Closed - Bye\r\n")
+                        chan.close()
+                        return
+                    if output:
+                        chan.sendall((output.replace("\n", "\r\n") + "\r\n").encode())
+                    chan.sendall(APC_PROMPT.encode())
+                elif ch in "\x08\x7f":
+                    if line:
+                        line = line[:-1]
+                        chan.sendall(b"\x08 \x08")
+                else:
+                    line += ch
+                    chan.sendall(ch.encode())  # terminal echo, as the real CLI does
 
 
 class MockPduServer:
     """
-    Context manager that starts a local mock HTTP server simulating authentic
-    APC, WTI, or Raritan physical PDU behavior and REST APIs.
+    Context manager that starts a local mock PDU: an SSH CLI server for APC,
+    an HTTP server for WTI (REST) and Raritan (JSON-RPC).
     """
     def __init__(self, vendor: str = "apc", channel_count: int = 8, port: int = 0,
-                 model_name: str = "", model_signature: str = "", voltage: float = 120.0):
+                 model_name: str = "", model_signature: str = "", voltage: float = 120.0,
+                 username: Optional[str] = None, password: Optional[str] = None):
         self.vendor = vendor.lower()
         self.channel_count = channel_count
         self.requested_port = port
         self.model_name = model_name
         self.model_signature = model_signature
         self.voltage = voltage
-        self.server: Optional[HTTPServer] = None
+        # Credentials the mock enforces; None accepts any login.
+        self.username = username
+        self.password = password
+        self.server = None
         self.thread: Optional[threading.Thread] = None
         self.host = "127.0.0.1"
         self.port = port
+        self.outlet_states: Dict[int, int] = {}
 
     def __enter__(self):
         self.start()
@@ -305,19 +454,26 @@ class MockPduServer:
         self.stop()
 
     def start(self):
-        class CustomHandler(MockEquipmentHandler):
-            pass
+        self.outlet_states = {ch: 1 for ch in range(1, self.channel_count + 1)}
 
-        CustomHandler.vendor = self.vendor
-        CustomHandler.model_name = self.model_name
-        CustomHandler.model_signature = self.model_signature
-        CustomHandler.voltage = self.voltage
-        CustomHandler.channel_count = self.channel_count
-        CustomHandler.outlet_states = {ch: 1 for ch in range(1, self.channel_count + 1)}
+        if self.vendor == "apc":
+            self.server = _ApcSshServer(
+                (self.host, self.requested_port),
+                lambda: ApcCliEngine(self.model_name, self.channel_count, self.outlet_states),
+                username=self.username, password=self.password)
+        else:
+            class CustomHandler(MockEquipmentHandler):
+                pass
 
-        self.server = HTTPServer((self.host, self.requested_port), CustomHandler)
+            CustomHandler.vendor = self.vendor
+            CustomHandler.model_name = self.model_name
+            CustomHandler.model_signature = self.model_signature
+            CustomHandler.voltage = self.voltage
+            CustomHandler.channel_count = self.channel_count
+            CustomHandler.outlet_states = self.outlet_states
+            self.server = HTTPServer((self.host, self.requested_port), CustomHandler)
+
         self.port = self.server.server_port
-
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         logger.debug(f"Started Mock {self.vendor.upper()} Server on {self.host}:{self.port}")
