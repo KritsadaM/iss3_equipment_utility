@@ -12,6 +12,9 @@ drivers match the hardware.
 | `apc/olstatus_all.txt`, `apc/olstatus_3_off.txt` | APC NMC CLI `olStatus` output format (`E000: Success` + ` <n>: <name>: On/Off` lines) from APC Switched Rack PDU user guides | Format only; outlet names/states chosen for the test |
 | `apc/login_banner.txt` | SSH login banner of a Schneider/APC rack PDU, captured in openbmc-test-automation `lib/pdu/schneider.robot`: https://github.com/openbmc/openbmc-test-automation | Yes |
 | `apc/prodinfo.txt` | `prodInfo` output observed on an AP7920B, documented in AVI-SPL's APC PDU driver (`ProductInformation.java`): https://github.com/AVISPL/dal-avdevices-power-apc-pdu | Yes. Whether an `E000: Success` line comes first is unconfirmed; the parser accepts both |
+| `apc/about_rpdu2g.txt` | `about` on a 2nd gen (rpdu2g) AP7920B, from AVI-SPL's driver tests (`PduDialectTest.java`) | Yes |
+| `apc/ver_rpdu.txt` | `ver` on a 1st gen (rpdu) AP7900, same source | Yes. Whether an `OK` line comes first is unconfirmed |
+| `apc/status_rpdu.txt` | 1st gen `status` lines (`number:STATE:name`), same source | Yes |
 | `apc/olon_success.txt` | APC NMC CLI result for `olOn`/`olOff` | Yes |
 | `apc/e102_parameter_error.txt` | APC NMC CLI error code list (`E102: Parameter Error`) | Yes |
 | `wti/powerplug_get_plug1.json` | WTI RESTful API introduction: https://wti.com/blogs/knowledge-base/restful-api-introduction (`GET /api/v2/config/powerplug`) | Yes |

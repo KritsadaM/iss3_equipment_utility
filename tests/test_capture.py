@@ -36,10 +36,10 @@ class TestCaptureSession(unittest.TestCase):
                 driver.disconnect()
         entries = self.entries(capture)
         commands = [e["request"].get("command") for e in entries]
-        self.assertEqual(commands, [None, "olStatus all", "olOff 3"])  # login, outlet count, command
+        self.assertEqual(commands, [None, "about", "olStatus all", "olOff 3"])  # login, dialect, outlet count, command
         self.assertEqual(entries[0]["request"], {"host": server.host, "port": server.port, "username": "ops"})
         self.assertIn("Network Management Card", self.read(capture, entries[0]["body_file"]))
-        self.assertEqual(self.read(capture, entries[2]["body_file"]), "E000: Success")
+        self.assertEqual(self.read(capture, entries[3]["body_file"]), "E000: Success")
         for name in os.listdir(capture.path):
             self.assertNotIn("hunter2-secret", self.read(capture, name))
 

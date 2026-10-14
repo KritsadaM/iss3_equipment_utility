@@ -32,7 +32,7 @@ apc:
   apc_ap8659:  {model: "APC AP8659 Switched Rack PDU with Outlet Metering", channels: 24, suffix: ".569"}
 
 wti:
-  wti_vmr_hd4d20: {model: "WTI VMR-HD4D20 C19",          channels: 20, suffix: ".40"}
+  wti_vmr_hd4d20: {model: "WTI VMR-HD4D20 C19",          channels: 4,  suffix: ".40"}
   wti_vmr_8hd20:  {model: "WTI VMR-8HD20 Switched PDU",   channels: 8,  suffix: ".408"}
   wti_vmr_16hd20: {model: "WTI VMR-16HD20 Switched PDU",  channels: 16, suffix: ".41"}
   wti_vmr_24hd20: {model: "WTI VMR-24HD20 Switched PDU",  channels: 24, suffix: ".424"}
@@ -59,7 +59,7 @@ raritan:
   raritan_px3_5190r:  {model: "Raritan PX3-5190R Switched PDU",  channels: 8,  suffix: ".619"}
   raritan_px3_5200r:  {model: "Raritan PX3-5200R Switched PDU",  channels: 8,  suffix: ".620"}
   raritan_px3_5440:   {model: "Raritan PX3-5440 Switched PDU",   channels: 20, suffix: ".640"}
-  raritan_px3_5460:   {model: "Raritan PX3-5460 Switched PDU",   channels: 30, suffix: ".61"}
+  raritan_px3_5460:   {model: "Raritan PX3-5460 Switched PDU",   channels: 20, suffix: ".61"}
   raritan_px3_5493:   {model: "Raritan PX3-5493 Switched PDU",   channels: 24, suffix: ".62"}
   raritan_px3_5524:   {model: "Raritan PX3-5524 Switched PDU",   channels: 24, suffix: ".624"}
   raritan_px3_5724:   {model: "Raritan PX3-5724 Switched PDU",   channels: 36, suffix: ".672"}

@@ -1,0 +1,2 @@
+1:ON:Outlet 1
+2:OFF:Rack Fan
