@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Ecosystem
+
+This repo is one of five: ISS3 (station software), iss3-core-release-template (the releases ISS3 runs), iss3_equipment_utility (lab gear CLIs), tdms-forwarder (station to TDMS upload) and ISS3-TDMS (the log server). The overview in [iss3-ecosystem](https://github.com/KritsadaM/iss3-ecosystem) (checked out at `~/iss3-ecosystem`) has the diagrams, the cross-repo contracts and the roadmap. Read it before changing anything this repo shares with another, and update it when a contract changes. Contracts that leave this repo: releases built from iss3-core-release-template are planned to call these CLIs through Robot keywords (roadmap item 3), which will make the CLI arguments and results an interface.
+
 ## Commands
 
 ```bash
